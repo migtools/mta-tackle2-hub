@@ -26,3 +26,11 @@ COPY --from=report  /usr/local/static-report /tmp/analysis/report
 #RUN echo "${VERSION}" > /etc/hub-build
 
 ENTRYPOINT ["/usr/local/bin/mta-hub"]
+
+LABEL \
+        description="Migration Toolkit for Applications - Hub" \
+        io.k8s.description="Migration Toolkit for Applications - Hub" \
+        io.k8s.display-name="MTA - Hub" \
+        io.openshift.maintainer.project="MTA" \
+        io.openshift.tags="migration,modernization,mta,tackle,konveyor" \
+        summary="Migration Toolkit for Applications - Hub"

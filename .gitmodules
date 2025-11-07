@@ -1,0 +1,4 @@
+[submodule "hack/build/seed"]
+	path = hack/build/seed
+	url = https://github.com/konveyor/tackle2-seed
+	branch = release-0.8

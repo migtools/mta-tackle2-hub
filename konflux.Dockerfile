@@ -1,6 +1,6 @@
 FROM registry.redhat.io/ubi9/go-toolset:1.23 AS builder
 COPY --chown=1001:0 . /workspace
-WORKDIR /workspace/hub
+WORKDIR /workspace
 ENV GOEXPERIMENT strictfipsruntime
 # bin/.build is not being tracked downstream as there is not git tree (.git) directory at build time needed by git describe
 RUN make vet && CGO_ENABLED=1 go build -tags json1,strictfipsruntime -o bin/hub github.com/konveyor/tackle2-hub/cmd

@@ -12,8 +12,7 @@ RUN sed -i -e '/Azure\ Kubernetes\ Service/,$d' /workspace/hack/build/seed/resou
 FROM brew.registry.redhat.io/rh-osbs/mta-mta-static-report-rhel9:8.0.0 as report
 
 FROM registry.redhat.io/ubi9:latest
-# FIX ME : Need CI_VERSION
-#ARG VERSION=${CI_VERSION}
+ARG VERSION=${BUILD_VERSION}
 RUN dnf -y install openssl sqlite && dnf -y clean all
 RUN echo "hub:x:1001:0:hub:/:/sbin/nologin" >> /etc/passwd
 
@@ -24,7 +23,7 @@ COPY --from=builder /workspace/LICENSE /licenses/
 COPY --from=builder /workspace/hack/build/seed/resources/ /tmp/seed
 COPY --from=report  /usr/local/static-report /tmp/analysis/report
 
-#RUN echo "${VERSION}" > /etc/hub-build
+RUN echo "${VERSION}" > /etc/hub-build
 
 ENTRYPOINT ["/usr/local/bin/mta-hub"]
 

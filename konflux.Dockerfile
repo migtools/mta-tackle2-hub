@@ -12,7 +12,7 @@ RUN sed -i -e '/Azure\ Kubernetes\ Service/,$d' /workspace/hack/build/seed/resou
 # Tini only available in EPEL for now (01/26/2026)
 FROM registry.redhat.io/ubi9:latest as tini-builder
 COPY --from=builder /workspace/hack/build/tini/ /workspace
-RUN dnf install -y cmake make gcc gcc-c++ glibc-static && dnf -y clean all
+RUN dnf install -y cmake make gcc gcc-c++ && dnf -y clean all
 WORKDIR /workspace
 RUN cmake . && make tini && ./tini --version
 

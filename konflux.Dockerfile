@@ -33,7 +33,7 @@ COPY --from=report  /usr/local/static-report /tmp/analysis/report
 
 RUN echo "${VERSION}" > /etc/hub-build
 
-ENTRYPOINT ["/usr/bin/tini", "--",  "/usr/local/bin/tackle-hub"]
+ENTRYPOINT ["/usr/bin/tini", "--",  "/usr/local/bin/mta-hub"]
 
 LABEL \
         description="Migration Toolkit for Applications - Hub" \

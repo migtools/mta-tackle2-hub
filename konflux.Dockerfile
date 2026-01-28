@@ -19,8 +19,11 @@ RUN cmake . && make tini && ./tini --version
 FROM brew.registry.redhat.io/rh-osbs/mta-mta-static-report-rhel9:8.0.0 as report
 
 FROM registry.redhat.io/ubi9:latest
+RUN mkdir -p /hub && chmod 0777 /hub
+ENV HOME=/hub
+WORKDIR /hub
 ARG VERSION=${BUILD_VERSION}
-RUN dnf -y install openssl sqlite && dnf -y clean all
+RUN dnf -y install openssl sqlite openssh-clients subversion git tar && dnf -y clean all
 RUN echo "hub:x:1001:0:hub:/:/sbin/nologin" >> /etc/passwd
 
 COPY --from=tini-builder /workspace/tini /usr/bin/tini

@@ -1,7 +1,7 @@
 [submodule "hack/build/seed"]
 	path = hack/build/seed
 	url = https://github.com/konveyor/tackle2-seed
-	branch = main
+	branch = release-0.9
 [submodule "hack/build/tini"]
 	path = hack/build/tini
 	url = https://github.com/krallin/tini.git

@@ -7,7 +7,7 @@ ENV GOFLAGS=-buildvcs=false
 RUN make vet && CGO_ENABLED=1 go build -tags json1,strictfipsruntime -o bin/hub github.com/konveyor/tackle2-hub/cmd
 
 # Remove AKS label from Azure target, assumes Azure is the last target listed
-RUN sed -i -e '/Azure\ Kubernetes\ Service/,$d' /workspace/hack/build/seed/resources/targets.yaml
+RUN sed -i -e '/Azure\ Kubernetes\ Service/{N;d}' /workspace/hack/build/seed/resources/targets.yaml
 
 # Tini only available in EPEL for now (01/26/2026)
 FROM registry.redhat.io/ubi9:latest as tini-builder

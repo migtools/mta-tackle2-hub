@@ -40,18 +40,21 @@ func NewTaskGroup(m *model.TaskGroup) (t *TaskGroup) {
 
 // Task is an runtime task.
 type Task struct {
-	// model.
 	*model.Task
-	digest string
+	digest   string
+	adjusted struct {
+		addon      string
+		extensions []string
+		priority   int
+	}
 }
 
 // With initializes the object.
 func (r *Task) With(m *model.Task) {
 	r.Task = m
-	r.digest = r.getDigest()
 }
 
-// StateIn returns true matches on of the specified states.
+// StateIn returns true matches one of the specified states.
 func (r *Task) StateIn(states ...string) (matched bool) {
 	for _, state := range states {
 		if r.State == state {
@@ -327,7 +330,7 @@ func (r *Task) podPending(pod *core.Pod) {
 		if state.Waiting != nil {
 			waiting := state.Waiting
 			reason := strings.ToLower(waiting.Reason)
-			if r.containsAny(reason, "invalid", "error", "never", "cannot") {
+			if r.containsAny(reason, "invalid", "error", "backoff", "errimagepull", "never", "cannot") {
 				r.Error(
 					"Error",
 					"Container (%s) failed: %s",
@@ -368,6 +371,18 @@ func (r *Task) Cancel(client k8s.Client) (err error) {
 		"Task canceled.",
 		"id",
 		r.ID)
+	return
+}
+
+// AfterFind updates the digest.
+func (r *Task) AfterFind(_ *gorm.DB) (err error) {
+	r.digest = r.getDigest()
+	return
+}
+
+// AfterSave updates the digest.
+func (r *Task) AfterSave(_ *gorm.DB) (err error) {
+	r.digest = r.getDigest()
 	return
 }
 
@@ -743,7 +758,6 @@ func (r *Task) update(db *gorm.DB) (err error) {
 	err = db.Save(r).Error
 	if err == nil {
 		Log.V(1).Info("Task updated.", "id", r.ID)
-		r.With(r.Task)
 	}
 	return
 }
@@ -788,19 +802,36 @@ func (r *Task) podRetentionExpired() (expired bool) {
 	if r.Terminated != nil {
 		mark = *r.Terminated
 	}
-	d := time.Duration(period) * time.Second
-	expired = time.Since(mark) > d
+	expired = time.Since(mark) > period
 	return
 }
 
-// retention returns the retention period (seconds).
-func (r *Task) podRetention() (seconds int) {
+// retention returns the retention period.
+func (r *Task) podRetention() (period time.Duration) {
 	if r.State == Succeeded {
-		seconds = Settings.Hub.Task.Pod.Retention.Succeeded
+		period = Settings.Hub.Task.Pod.Retention.Succeeded
 	} else {
-		seconds = Settings.Hub.Task.Pod.Retention.Failed
+		period = Settings.Hub.Task.Pod.Retention.Failed
 	}
 	return
+}
+
+// stashAdjusted records fields adjusted during scheduling.
+func (r *Task) stashAdjusted() {
+	r.adjusted.addon = r.Addon
+	r.adjusted.extensions = r.Extensions
+	r.adjusted.priority = r.Priority
+}
+
+// restoreAdjusted restores fields adjusted during scheduling.
+func (r *Task) restoreAdjusted() {
+	if r.State == Ready ||
+		r.State == Postponed ||
+		r.State == QuotaBlocked {
+		r.Addon = r.adjusted.addon
+		r.Extensions = r.adjusted.extensions
+		r.Priority = r.adjusted.priority
+	}
 }
 
 // Event represents a pod event.

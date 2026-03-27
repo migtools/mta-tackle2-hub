@@ -1,4 +1,4 @@
-FROM registry.redhat.io/ubi9/go-toolset:1.23 AS builder
+FROM registry.redhat.io/ubi10/go-toolset:1.23 AS builder
 COPY --chown=1001:0 . /workspace
 WORKDIR /workspace
 ENV GOEXPERIMENT strictfipsruntime
@@ -10,7 +10,7 @@ RUN make vet && CGO_ENABLED=1 go build -tags json1,strictfipsruntime -o bin/hub 
 RUN sed -i -e '/Azure\ Kubernetes\ Service/,$d' /workspace/hack/build/seed/resources/targets.yaml
 
 # Tini only available in EPEL for now (01/26/2026)
-FROM registry.redhat.io/ubi9:latest as tini-builder
+FROM registry.redhat.io/ubi10:latest as tini-builder
 COPY --from=builder /workspace/hack/build/tini/ /workspace
 RUN dnf install -y cmake make gcc gcc-c++ && dnf -y clean all
 WORKDIR /workspace
@@ -18,7 +18,7 @@ RUN cmake . && make tini && ./tini --version
 
 FROM brew.registry.redhat.io/rh-osbs/mta-mta-static-report-rhel9:8.0.0 as report
 
-FROM registry.redhat.io/ubi9:latest
+FROM registry.redhat.io/ubi10:latest
 RUN mkdir -p /hub && chmod 0777 /hub
 ENV HOME=/hub
 WORKDIR /hub

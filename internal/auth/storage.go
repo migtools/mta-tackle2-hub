@@ -59,6 +59,7 @@ func (r *Storage) GetClientByClientID(ctx context.Context, clientId string) (opC
 			grantTypes:      []string{"authorization_code"},
 			redirectURIs:    []string{AppendIssuer(req, api.DeviceCbRoute)},
 			scopes:          []string{"openid"},
+			request:         req,
 		}
 		return
 	}
@@ -403,6 +404,41 @@ func (r *Storage) TerminateSession(ctx context.Context, userID, _ string) (err e
 	err = r.deleteTokensBySubject(ctx, userID)
 	if err != nil {
 		return
+	}
+	return
+}
+
+// TerminateSessionFromRequest terminates a user session and returns the redirect URL.
+// For federated (OIDC) users, the redirect chains through the upstream IdP's
+// end_session_endpoint so that both the hub and IdP sessions are terminated.
+func (r *Storage) TerminateSessionFromRequest(
+	ctx context.Context,
+	req *op.EndSessionRequest) (redirect string, err error) {
+	//
+	err = r.TerminateSession(ctx, req.UserID, req.ClientID)
+	if err != nil {
+		return
+	}
+	redirect = req.RedirectURI
+	if req.UserID == "" {
+		return
+	}
+	s, err := r.findSubject(req.UserID)
+	if err != nil {
+		if errors.Is(err, &NotFound{}) {
+			err = nil
+		}
+		return
+	}
+	if !s.IsIdentity() || s.Identity.Kind != IdentityKindOpenid {
+		return
+	}
+	logoutURL, err := r.idpHandler.EndSessionURL(req.RedirectURI)
+	if err != nil {
+		return
+	}
+	if logoutURL != "" {
+		redirect = logoutURL
 	}
 	return
 }

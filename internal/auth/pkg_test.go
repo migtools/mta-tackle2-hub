@@ -3,11 +3,15 @@ package auth
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	as "github.com/konveyor/tackle2-hub/internal/auth/settings"
@@ -15,7 +19,10 @@ import (
 	"github.com/konveyor/tackle2-hub/internal/model"
 	"github.com/konveyor/tackle2-hub/internal/secret"
 	. "github.com/onsi/gomega"
+	"github.com/zitadel/oidc/v3/pkg/client/rp"
+	httphelper "github.com/zitadel/oidc/v3/pkg/http"
 	"github.com/zitadel/oidc/v3/pkg/op"
+	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 )
 
@@ -414,30 +421,30 @@ func TestBaseScopeMatching(t *testing.T) {
 	g := NewGomegaWithT(t)
 
 	// Wildcard scope matches everything
-	scope := &BaseScope{Resource: "*", Method: "*"}
+	scope := Scope{Resource: "*", Method: "*"}
 	g.Expect(scope.Match("applications", "GET")).To(BeTrue())
 	g.Expect(scope.Match("tags", "POST")).To(BeTrue())
 
 	// Resource wildcard matches any method for that resource
-	scope = &BaseScope{Resource: "applications", Method: "*"}
+	scope = Scope{Resource: "applications", Method: "*"}
 	g.Expect(scope.Match("applications", "GET")).To(BeTrue())
 	g.Expect(scope.Match("applications", "POST")).To(BeTrue())
 	g.Expect(scope.Match("tags", "GET")).To(BeFalse())
 
 	// Method wildcard matches that method for any resource
-	scope = &BaseScope{Resource: "*", Method: "GET"}
+	scope = Scope{Resource: "*", Method: "GET"}
 	g.Expect(scope.Match("applications", "GET")).To(BeTrue())
 	g.Expect(scope.Match("tags", "GET")).To(BeTrue())
 	g.Expect(scope.Match("applications", "POST")).To(BeFalse())
 
 	// Exact match
-	scope = &BaseScope{Resource: "applications", Method: "GET"}
+	scope = Scope{Resource: "applications", Method: "GET"}
 	g.Expect(scope.Match("applications", "GET")).To(BeTrue())
 	g.Expect(scope.Match("applications", "POST")).To(BeFalse())
 	g.Expect(scope.Match("tags", "GET")).To(BeFalse())
 
 	// Case insensitive
-	scope = &BaseScope{Resource: "Applications", Method: "get"}
+	scope = Scope{Resource: "Applications", Method: "get"}
 	g.Expect(scope.Match("applications", "GET")).To(BeTrue())
 }
 
@@ -445,18 +452,18 @@ func TestBaseScopeMatching(t *testing.T) {
 func TestBaseScopeParsing(t *testing.T) {
 	g := NewGomegaWithT(t)
 
-	scope := &BaseScope{}
+	scope := Scope{}
 	scope.With("applications:read")
 	g.Expect(scope.Resource).To(Equal("applications"))
 	g.Expect(scope.Method).To(Equal("read"))
 
-	scope = &BaseScope{}
+	scope = Scope{}
 	scope.With("*:*")
 	g.Expect(scope.Resource).To(Equal("*"))
 	g.Expect(scope.Method).To(Equal("*"))
 
 	// Test String() roundtrip
-	scope = &BaseScope{Resource: "tags", Method: "write"}
+	scope = Scope{Resource: "tags", Method: "write"}
 	g.Expect(scope.String()).To(Equal("tags:write"))
 }
 
@@ -3253,4 +3260,177 @@ func setupTestDB() (db *gorm.DB, err error) {
 		&Identity{},
 	)
 	return
+}
+
+// mockRelyingParty implements rp.RelyingParty for testing.
+type mockRelyingParty struct {
+	endSessionEndpoint string
+}
+
+func (m *mockRelyingParty) OAuthConfig() *oauth2.Config             { return &oauth2.Config{} }
+func (m *mockRelyingParty) Issuer() string                          { return "" }
+func (m *mockRelyingParty) IsPKCE() bool                            { return false }
+func (m *mockRelyingParty) CookieHandler() *httphelper.CookieHandler { return nil }
+func (m *mockRelyingParty) HttpClient() *http.Client                { return nil }
+func (m *mockRelyingParty) IsOAuth2Only() bool                      { return false }
+func (m *mockRelyingParty) Signer() jose.Signer                    { return nil }
+func (m *mockRelyingParty) GetEndSessionEndpoint() string           { return m.endSessionEndpoint }
+func (m *mockRelyingParty) GetRevokeEndpoint() string               { return "" }
+func (m *mockRelyingParty) UserinfoEndpoint() string                { return "" }
+func (m *mockRelyingParty) GetDeviceAuthorizationEndpoint() string  { return "" }
+func (m *mockRelyingParty) IDTokenVerifier() *rp.IDTokenVerifier    { return nil }
+func (m *mockRelyingParty) ErrorHandler() func(http.ResponseWriter, *http.Request, string, string, string) {
+	return nil
+}
+func (m *mockRelyingParty) Logger(context.Context) (*slog.Logger, bool) { return nil, false }
+
+// TestEndSessionURL tests building the upstream IdP end_session URL.
+func TestEndSessionURL(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled:  true,
+		ClientId: "hub-client",
+	}
+
+	h := &FedIdpHandler{
+		rpClient: &mockRelyingParty{
+			endSessionEndpoint: "https://keycloak.example.com/realms/myrealm/protocol/openid-connect/logout",
+		},
+	}
+
+	logoutURL, err := h.EndSessionURL("https://app.example.com/")
+	g.Expect(err).To(BeNil())
+	g.Expect(logoutURL).NotTo(BeEmpty())
+	u, err := url.Parse(logoutURL)
+	g.Expect(err).To(BeNil())
+	g.Expect(u.Scheme).To(Equal("https"))
+	g.Expect(u.Host).To(Equal("keycloak.example.com"))
+	g.Expect(u.Query().Get("client_id")).To(Equal("hub-client"))
+	g.Expect(u.Query().Get("post_logout_redirect_uri")).To(Equal("https://app.example.com/"))
+}
+
+// TestEndSessionURLNoRedirect tests building the URL without a post_logout_redirect_uri.
+func TestEndSessionURLNoRedirect(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled:  true,
+		ClientId: "hub-client",
+	}
+
+	h := &FedIdpHandler{
+		rpClient: &mockRelyingParty{
+			endSessionEndpoint: "https://keycloak.example.com/logout",
+		},
+	}
+
+	logoutURL, err := h.EndSessionURL("")
+	g.Expect(err).To(BeNil())
+	g.Expect(logoutURL).NotTo(BeEmpty())
+	u, err := url.Parse(logoutURL)
+	g.Expect(err).To(BeNil())
+	g.Expect(u.Query().Get("client_id")).To(Equal("hub-client"))
+	g.Expect(u.Query().Get("post_logout_redirect_uri")).To(Equal(""))
+}
+
+// TestEndSessionURLExistingQuery tests that existing query parameters
+// on the end_session_endpoint are preserved.
+func TestEndSessionURLExistingQuery(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled:  true,
+		ClientId: "hub-client",
+	}
+
+	h := &FedIdpHandler{
+		rpClient: &mockRelyingParty{
+			endSessionEndpoint: "https://keycloak.example.com/logout?foo=bar",
+		},
+	}
+
+	logoutURL, err := h.EndSessionURL("https://app.example.com/")
+	g.Expect(err).To(BeNil())
+	g.Expect(logoutURL).NotTo(BeEmpty())
+	u, err := url.Parse(logoutURL)
+	g.Expect(err).To(BeNil())
+	g.Expect(u.Query().Get("foo")).To(Equal("bar"))
+	g.Expect(u.Query().Get("client_id")).To(Equal("hub-client"))
+	g.Expect(u.Query().Get("post_logout_redirect_uri")).To(Equal("https://app.example.com/"))
+}
+
+// TestEndSessionURLDisabled tests that EndSessionURL returns empty when IdP is disabled.
+func TestEndSessionURLDisabled(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled: false,
+	}
+
+	h := &FedIdpHandler{
+		rpClient: &mockRelyingParty{
+			endSessionEndpoint: "https://keycloak.example.com/logout",
+		},
+	}
+
+	logoutURL, err := h.EndSessionURL("https://app.example.com/")
+	g.Expect(err).To(BeNil())
+	g.Expect(logoutURL).To(BeEmpty())
+}
+
+// TestEndSessionURLNoEndpoint tests that EndSessionURL returns empty
+// when the IdP has no end_session_endpoint.
+func TestEndSessionURLNoEndpoint(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled:  true,
+		ClientId: "hub-client",
+	}
+
+	h := &FedIdpHandler{
+		rpClient: &mockRelyingParty{
+			endSessionEndpoint: "",
+		},
+	}
+
+	logoutURL, err := h.EndSessionURL("https://app.example.com/")
+	g.Expect(err).To(BeNil())
+	g.Expect(logoutURL).To(BeEmpty())
+}
+
+// TestEndSessionURLNoClient tests that EndSessionURL returns an error
+// when the RP client cannot be initialized.
+func TestEndSessionURLNoClient(t *testing.T) {
+	g := NewGomegaWithT(t)
+
+	savedFederated := *federated
+	defer func() { *federated = savedFederated }()
+
+	federated.Idp = as.IdentityProvider{
+		Enabled:  true,
+		ClientId: "hub-client",
+	}
+
+	h := &FedIdpHandler{}
+
+	logoutURL, err := h.EndSessionURL("https://app.example.com/")
+	g.Expect(err).NotTo(BeNil())
+	g.Expect(logoutURL).To(BeEmpty())
 }

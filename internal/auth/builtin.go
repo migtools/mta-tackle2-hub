@@ -26,6 +26,10 @@ func NewBuiltin(db *gorm.DB) (builtin *Builtin, err error) {
 		cache: cache,
 		db:    db,
 	}
+	err = cache.Refresh()
+	if err != nil {
+		return
+	}
 	keyManager := NewKeyManager(db)
 	builtin.keySet, err = keyManager.KeySet()
 	if err != nil {
@@ -191,16 +195,15 @@ func (p *Builtin) NewToken(subject string, lifespan time.Duration) (m Token, err
 }
 
 // TaskGrant creates a new task api-key.
-func (p *Builtin) TaskGrant(taskId uint) (m Token, err error) {
-	m = p.newToken("", 0)
-	m.TaskID = &taskId
+func (p *Builtin) TaskGrant(task *Task) (m Token, err error) {
+	m = p.newToken(task.Subject(), 0)
+	m.TaskID = &task.ID
 	err = p.db.Create(&m).Error
 	if err != nil {
 		err = liberr.Wrap(err)
 		return
 	}
 	p.cache.TokenSaved(&m)
-	p.cache.TaskGranted(taskId)
 	return
 }
 
@@ -520,7 +523,7 @@ func (p *Builtin) authToken(req *Request) (jwToken *jwt.Token, err error) {
 		jwtClaims := jwToken.Claims.(jwt.MapClaims)
 		jwtClaims[ClaimId] = pat.AuthId
 		jwtClaims[ClaimSub] = pat.Subject
-		jwtClaims[ClaimScope] = pat.Scopes
+		jwtClaims[ClaimScope] = strings.Join(pat.Scopes, " ")
 		jwtClaims[ClaimIss] = Issuer(req.CTX.Request)
 		jwtClaims[ClaimIat] = time.Now().Unix()
 		jwtClaims[ClaimExp] = pat.Expiration.Unix()

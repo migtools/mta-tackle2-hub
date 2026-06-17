@@ -77,6 +77,7 @@ func port() (port string) {
 }
 
 // main.
+// Note: The initialization order is very important.
 func main() {
 	Log.Info("Started:\n" + Settings.String())
 	var err error
@@ -119,6 +120,11 @@ func main() {
 	client, err := k8s.NewClient()
 	if err != nil {
 		err = liberr.Wrap(err)
+		return
+	}
+	// Auth
+	auth.IdP, err = auth.New(db)
+	if err != nil {
 		return
 	}
 	// Document migration.
@@ -168,11 +174,6 @@ func main() {
 		}
 		metricsManager.Run(context.Background())
 	}
-	// Auth
-	auth.IdP, err = auth.New(db)
-	if err != nil {
-		return
-	}
 	// Web
 	router := gin.Default()
 	router.Use(
@@ -181,8 +182,8 @@ func main() {
 			rtx.TaskManager = taskManager
 			rtx.DB = db
 			rtx.Client = client
+			defer rtx.Detach()
 			ctx.Next()
-			rtx.Detach()
 		})
 	router.Use(api.Render())
 	router.Use(api.ErrorHandler())
@@ -190,9 +191,13 @@ func main() {
 		h.AddRoutes(router)
 	}
 	//
-	// Auth
+	// Auth domain.
 	domain := auth.NewDomain(db)
 	err = domain.Seed()
+	if err != nil {
+		return
+	}
+	err = auth.IdP.Cache().Refresh()
 	if err != nil {
 		return
 	}

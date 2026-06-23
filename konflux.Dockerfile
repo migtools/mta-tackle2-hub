@@ -23,13 +23,11 @@ RUN mkdir -p /hub && chmod 0777 /hub
 ENV HOME=/hub
 WORKDIR /hub
 ARG VERSION=${BUILD_VERSION}
-RUN dnf -y install openssl sqlite openssh-clients subversion git tar && dnf -y clean all
+RUN dnf -y install openssl sqlite openssh-clients subversion git tar vim && dnf -y clean all
 RUN echo "hub:x:1001:0:hub:/:/sbin/nologin" >> /etc/passwd
 
 COPY --from=tini-builder /workspace/tini /usr/bin/tini
 COPY --from=builder /workspace/bin/hub /usr/local/bin/mta-hub
-COPY --from=builder /workspace/internal/auth/roles.yaml /tmp/roles.yaml
-COPY --from=builder /workspace/internal/auth/users.yaml /tmp/users.yaml
 COPY --from=builder /workspace/LICENSE /licenses/
 COPY --from=builder /workspace/hack/build/seed/resources/ /tmp/seed
 COPY --from=report  /usr/local/static-report /tmp/analysis/report

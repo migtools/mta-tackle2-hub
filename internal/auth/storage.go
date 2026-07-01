@@ -64,11 +64,11 @@ func (r *Storage) GetClientByClientID(ctx context.Context, clientId string) (opC
 		}
 		return
 	}
-	m := &IdpClient{}
-	err = r.db.First(m, "ClientId", clientId).Error
+	m, err := r.cache.FindClientByStrId(clientId)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = oidc.ErrInvalidClient().WithDescription("client not-found.")
+		if errors.Is(err, &NotFound{}) {
+			err = oidc.ErrInvalidClient().
+				WithDescription("%s", err.Error())
 		} else {
 			err = liberr.Wrap(err)
 		}
@@ -285,9 +285,9 @@ func (r *Storage) CreateAccessToken(
 	subject := req.GetSubject()
 	s, err := r.findSubject(subject)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err = nil
-		}
+		err = oidc.ErrInvalidGrant().
+			WithDescription("%s", err.Error())
+		return
 	}
 	var authId string
 	var grantId string
@@ -343,6 +343,14 @@ func (r *Storage) CreateAccessToken(
 	if err != nil {
 		err = liberr.Wrap(err)
 		return
+	}
+
+	if len(s.Scopes) == 0 {
+		Log.Info(
+			"WARNING: issued (access) token has no scopes.",
+			"login", s.Login(),
+			"authId", m.AuthId,
+			"id", m.ID)
 	}
 	return
 }
@@ -400,10 +408,10 @@ func (r *Storage) TokenRequestByRefreshToken(
 		grantId:  grant.AuthId,
 		clientId: grant.ClientId,
 		subject:  grant.Subject,
-		scopes:   strings.Fields(grant.Scopes),
+		scopes:   grant.Scopes,
 		issued:   grant.Issued,
 	}
-	err = r.refreshIdentity(req)
+	err = r.refreshIdentity(req, grant)
 	if err == nil {
 		return
 	}
@@ -847,7 +855,7 @@ func (r *Login) authUser() (err error) {
 			return
 		}
 		var scopes []string
-		scopes, err = cache.FindUserScopes(user.ID)
+		scopes, err = cache.FindScopes(user.Subject)
 		if err != nil {
 			return
 		}
@@ -861,8 +869,7 @@ func (r *Login) authUser() (err error) {
 
 // authUser authenticates an LDAP user.
 func (r *Login) authLdapUser() (err error) {
-	lifespan := Settings.Auth.Token.Lifespan
-	r.subject, err = r.storage.dsHandler.Authenticate(r.login, r.password, lifespan)
+	r.subject, err = r.storage.dsHandler.Authenticate(r.login, r.password)
 	return
 }
 
@@ -883,6 +890,7 @@ func (r *Login) updateAuthRequest() (err error) {
 	}
 
 	r.authReq.subject = r.subject.Key
+	r.authReq.idpRefreshToken = r.password
 	r.authReq.issued = time.Now()
 	r.authReq.done = true
 	return
@@ -1075,7 +1083,7 @@ func (r *Storage) injectScopes(req op.TokenRequest) (err error) {
 	if s == nil {
 		return
 	}
-	scopes := append(req.GetScopes(), s.Scopes...)
+	scopes := append(req.GetScopes(), ExpandScopes(s.Scopes...)...)
 	scopes = uniqueStrings(scopes)
 	sort.Strings(scopes)
 	switch r := req.(type) {
@@ -1131,7 +1139,7 @@ func (r *Storage) createRefreshToken(ctx context.Context, req op.TokenRequest) (
 }
 
 // refreshIdentity refreshes the Idp identity.
-func (r *Storage) refreshIdentity(req op.RefreshTokenRequest) (err error) {
+func (r *Storage) refreshIdentity(req op.RefreshTokenRequest, grant *Grant) (err error) {
 	subject := req.GetSubject()
 	s, err := r.findSubject(subject)
 	if err != nil {
@@ -1147,24 +1155,50 @@ func (r *Storage) refreshIdentity(req op.RefreshTokenRequest) (err error) {
 	// Refresh based on identity kind
 	switch s.Identity.Kind {
 	case IdentityKindLDAP:
-		err = r.refreshLdapIdentity(s.Identity)
+		err = r.refreshLdapIdentity(s.Identity, grant)
+		if err != nil {
+			return
+		}
+		_, err = secret.Encode(grant)
+		if err != nil {
+			err = liberr.Wrap(err)
+			return
+		}
+		err = r.db.Save(grant).Error
+		if err != nil {
+			err = liberr.Wrap(err)
+			return
+		}
 	case IdentityKindOpenid:
 		login := &FedIdpLogin{
 			handler:  r.idpHandler,
 			identity: s.Identity,
 		}
-		err = login.RefreshIdentity()
+		err = login.refreshIdentity(grant)
+		if err != nil {
+			return
+		}
+		_, err = secret.Encode(grant)
+		if err != nil {
+			err = liberr.Wrap(err)
+			return
+		}
+		err = r.db.Save(grant).Error
+		if err != nil {
+			err = liberr.Wrap(err)
+			return
+		}
 	}
 	return
 }
 
 // refreshLdapIdentity re-authenticates with LDAP and updates the identity.
-func (r *Storage) refreshLdapIdentity(identity *Identity) (err error) {
+func (r *Storage) refreshLdapIdentity(identity *Identity, grant *Grant) (err error) {
 	if !r.dsHandler.enabled {
 		return
 	}
-	password := identity.RefreshToken
-	subject, err := r.dsHandler.Authenticate(identity.Login, password, Settings.Auth.Token.Lifespan)
+	password := grant.IdpRefreshToken
+	subject, err := r.dsHandler.Authenticate(identity.Login, password)
 	if err != nil {
 		return
 	}
@@ -1247,6 +1281,11 @@ func (r *Storage) grantByRefreshToken(_ context.Context, token string) (m *Grant
 		}
 		return
 	}
+	err = secret.Decode(m)
+	if err != nil {
+		err = liberr.Wrap(err)
+		return
+	}
 	err = r.orphaned(m)
 	if err != nil {
 		return
@@ -1295,7 +1334,6 @@ func (r *Storage) createGrant(
 	//
 	grantId = authId
 	expiration := time.Now().Add(Settings.Token.RefreshLifespan)
-	scopes := strings.Join(req.GetScopes(), " ")
 
 	m := &Grant{}
 	m.Kind = KindAuthCode
@@ -1304,9 +1342,26 @@ func (r *Storage) createGrant(
 	m.Subject = req.GetSubject()
 	m.AuthCode = authCode
 	m.RefreshToken = r.genId()
-	m.Scopes = scopes
+	m.Scopes = req.GetScopes()
 	m.Issued = req.GetAuthTime()
 	m.Expiration = expiration
+	subject, err := r.findSubject(req.GetSubject())
+	if err != nil {
+		return
+	}
+	m.UserID = subject.UserId
+	m.IdpIdentityID = subject.IdentityId
+	m.IdpClientID = subject.ClientId
+	if authReq, cast := req.(*AuthRequest); cast {
+		if authReq.idpRefreshToken != "" {
+			m.IdpRefreshToken = authReq.idpRefreshToken
+		}
+	}
+	_, err = secret.Encode(m)
+	if err != nil {
+		err = liberr.Wrap(err)
+		return
+	}
 	err = r.db.Create(m).Error
 	if err != nil {
 		err = liberr.Wrap(err)
@@ -1678,15 +1733,25 @@ func (c *Client) requestedURI() (u string) {
 	return
 }
 
+// GrantRequest defines the interface needed for creating grants.
+type GrantRequest interface {
+	GetClientID() string
+	GetSubject() string
+	GetScopes() []string
+	GetAuthTime() time.Time
+}
+
 // AuthRequest implements op.AuthRequest.
 type AuthRequest struct {
 	*oidc.AuthRequest
-	requestId  string
-	subject    string
-	authCode   string
-	issued     time.Time
-	expiration time.Time
-	done       bool
+	requestId       string
+	subject         string
+	authCode        string
+	issued          time.Time
+	expiration      time.Time
+	done            bool
+	idpRefreshToken string
+	idpIdentityId   uint
 }
 
 // GetID returns the request ID.
@@ -1951,12 +2016,4 @@ func (k *Key) Key() (key any) {
 func (k *Key) ID() (s string) {
 	s = k.jwk.KeyID
 	return
-}
-
-// GrantRequest defines the interface needed for creating grants.
-type GrantRequest interface {
-	GetClientID() string
-	GetSubject() string
-	GetScopes() []string
-	GetAuthTime() time.Time
 }

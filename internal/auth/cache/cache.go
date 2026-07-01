@@ -3,7 +3,6 @@ package cache
 import (
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -158,7 +157,7 @@ func (r *Cache) TokenDeleted(id uint) {
 	})
 }
 
-// GrantDeleted removes a grant and all associated tokens from the cache.
+// GrantDeleted removes all tokens associated with a grant from the cache.
 func (r *Cache) GrantDeleted(id uint) {
 	_ = r.Transaction(func(tx *Tx) (_ error) {
 		tx.GrantDeleted(id)
@@ -207,7 +206,7 @@ func (r *Cache) FindSubject(subject string) (s *Subject, err error) {
 	if found {
 		s = &Subject{}
 		var scopes []string
-		scopes, err = r.FindUserScopes(user.ID)
+		scopes, err = r.FindScopes(user.Subject)
 		if err != nil {
 			return
 		}
@@ -296,15 +295,57 @@ func (r *Cache) FindUserByLogin(login string) (m *User, err error) {
 	return
 }
 
-// FindUserScopes returns the user scopes.
-func (r *Cache) FindUserScopes(id uint) (scopes []string, err error) {
+// FindClientById returns a client by id.
+func (r *Cache) FindClientById(id uint) (m *IdpClient, err error) {
 	defer r.ensureRefreshed()
 	d := r.data.Load()
-	scopes, found := d.userScopes[id]
+	m, found := d.clientById[id]
 	if !found {
 		err = &NotFound{
-			Resource: "user",
-			Id:       strconv.Itoa(int(id)),
+			Resource: "client",
+			Id:       strconv.FormatUint(uint64(id), 10),
+		}
+	}
+	return
+}
+
+// FindClientByStrId returns a client (string) by id.
+func (r *Cache) FindClientByStrId(id string) (m *IdpClient, err error) {
+	defer r.ensureRefreshed()
+	d := r.data.Load()
+	m, found := d.clientByStringId[id]
+	if !found {
+		err = &NotFound{
+			Resource: "client",
+			Id:       id,
+		}
+	}
+	return
+}
+
+// FindClientBySubject returns a client by subject.
+func (r *Cache) FindClientBySubject(subject string) (m *IdpClient, err error) {
+	defer r.ensureRefreshed()
+	d := r.data.Load()
+	m, found := d.clientBySubject[subject]
+	if !found {
+		err = &NotFound{
+			Resource: "client",
+			Id:       subject,
+		}
+	}
+	return
+}
+
+// FindScopes returns the subject scopes.
+func (r *Cache) FindScopes(subject string) (scopes []string, err error) {
+	defer r.ensureRefreshed()
+	d := r.data.Load()
+	scopes, found := d.scopesBySubject[subject]
+	if !found {
+		err = &NotFound{
+			Resource: "subject",
+			Id:       subject,
 		}
 	}
 	return
@@ -357,20 +398,21 @@ type Data struct {
 	refreshOnce sync.Once
 	refreshed   time.Time
 	//
-	permById        map[uint]*Permission
-	roleById        map[uint]*Role
-	roleByName      map[string]*Role
-	userById        map[uint]*User
-	userBySubject   map[string]*User
-	userByLogin     map[string]*User
-	userScopes      map[uint][]string
-	identById       map[uint]*Identity
-	identBySubject  map[string]*Identity
-	identByLogin    map[string]*Identity
-	clientById      map[uint]*IdpClient
-	clientBySubject map[string]*IdpClient
-	tokenById       map[uint]*Token
-	tokenByDigest   map[string]*Token
+	permById         map[uint]*Permission
+	roleById         map[uint]*Role
+	roleByName       map[string]*Role
+	userById         map[uint]*User
+	userBySubject    map[string]*User
+	userByLogin      map[string]*User
+	identById        map[uint]*Identity
+	identBySubject   map[string]*Identity
+	identByLogin     map[string]*Identity
+	clientById       map[uint]*IdpClient
+	clientByStringId map[string]*IdpClient
+	clientBySubject  map[string]*IdpClient
+	tokenById        map[uint]*Token
+	tokenByDigest    map[string]*Token
+	scopesBySubject  map[string][]string
 }
 
 // reset creates new maps.
@@ -381,11 +423,12 @@ func (d *Data) reset() {
 	d.userById = make(map[uint]*User)
 	d.userBySubject = make(map[string]*User)
 	d.userByLogin = make(map[string]*User)
-	d.userScopes = make(map[uint][]string)
+	d.scopesBySubject = make(map[string][]string)
 	d.identById = make(map[uint]*Identity)
 	d.identBySubject = make(map[string]*Identity)
 	d.identByLogin = make(map[string]*Identity)
 	d.clientById = make(map[uint]*IdpClient)
+	d.clientByStringId = make(map[string]*IdpClient)
 	d.clientBySubject = make(map[string]*IdpClient)
 	d.tokenById = make(map[uint]*Token)
 	d.tokenByDigest = make(map[string]*Token)
@@ -396,22 +439,23 @@ func (d *Data) reset() {
 // refreshOnce is new.
 func (d *Data) clone() *Data {
 	return &Data{
-		refreshOnce:     sync.Once{},
-		refreshed:       d.refreshed,
-		permById:        cloneMap(d.permById),
-		roleById:        cloneMap(d.roleById),
-		roleByName:      cloneMap(d.roleByName),
-		userById:        cloneMap(d.userById),
-		userBySubject:   cloneMap(d.userBySubject),
-		userByLogin:     cloneMap(d.userByLogin),
-		userScopes:      cloneMap(d.userScopes),
-		identById:       cloneMap(d.identById),
-		identBySubject:  cloneMap(d.identBySubject),
-		identByLogin:    cloneMap(d.identByLogin),
-		clientById:      cloneMap(d.clientById),
-		clientBySubject: cloneMap(d.clientBySubject),
-		tokenById:       cloneMap(d.tokenById),
-		tokenByDigest:   cloneMap(d.tokenByDigest),
+		refreshOnce:      sync.Once{},
+		refreshed:        d.refreshed,
+		permById:         cloneMap(d.permById),
+		roleById:         cloneMap(d.roleById),
+		roleByName:       cloneMap(d.roleByName),
+		userById:         cloneMap(d.userById),
+		userBySubject:    cloneMap(d.userBySubject),
+		userByLogin:      cloneMap(d.userByLogin),
+		scopesBySubject:  cloneMap(d.scopesBySubject),
+		identById:        cloneMap(d.identById),
+		identBySubject:   cloneMap(d.identBySubject),
+		identByLogin:     cloneMap(d.identByLogin),
+		clientById:       cloneMap(d.clientById),
+		clientByStringId: cloneMap(d.clientByStringId),
+		clientBySubject:  cloneMap(d.clientBySubject),
+		tokenById:        cloneMap(d.tokenById),
+		tokenByDigest:    cloneMap(d.tokenByDigest),
 	}
 }
 
@@ -528,6 +572,7 @@ func (d *Data) getClients(db *gorm.DB) (err error) {
 	}
 	for _, m := range list {
 		d.clientById[m.ID] = m
+		d.clientByStringId[m.ClientId] = m
 		d.clientBySubject[m.Subject] = m
 	}
 	return
@@ -564,7 +609,7 @@ func (d *Data) addTokenScopes(m *Token) {
 	}()
 	// user binding.
 	if m.UserID != nil {
-		scopes, found := d.userScopes[*m.UserID]
+		scopes, found := d.scopesBySubject[m.Subject]
 		if !found {
 			err = &NotFound{
 				Resource: "user.scopes",
@@ -582,7 +627,7 @@ func (d *Data) addTokenScopes(m *Token) {
 	}
 	// IdP identity binding.
 	if m.IdpIdentityID != nil {
-		identity, found := d.identById[*m.IdpIdentityID]
+		_, found := d.identById[*m.IdpIdentityID]
 		if !found {
 			err = &NotFound{
 				Resource: "identity",
@@ -590,7 +635,10 @@ func (d *Data) addTokenScopes(m *Token) {
 			}
 			return
 		}
-		m.Scopes = strings.Fields(identity.Scopes)
+		scopes, found := d.scopesBySubject[m.Subject]
+		if found {
+			m.Scopes = scopes
+		}
 		return
 	}
 	// IdP client binding.
@@ -628,14 +676,17 @@ func (d *Data) addUserScopes(m *User) {
 	}
 	scopes = uniqueStrings(scopes)
 	sort.Strings(scopes)
-	d.userScopes[m.ID] = scopes
+	d.scopesBySubject[m.Subject] = scopes
 }
 
-// updateScopes
+// updateScopes update calculated scopes.
 func (d *Data) updateScopes() {
-	d.userScopes = make(map[uint][]string)
+	d.scopesBySubject = make(map[string][]string)
 	for _, m := range d.userById {
 		d.addUserScopes(m)
+	}
+	for _, m := range d.identById {
+		d.scopesBySubject[m.Subject] = m.Scopes
 	}
 	for _, m := range d.tokenById {
 		d.addTokenScopes(m)

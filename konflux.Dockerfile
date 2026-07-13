@@ -5,7 +5,8 @@ FROM registry.redhat.io/ubi10/nodejs-22:latest AS frontend
 ARG BRANDING
 COPY --chown=1001:0 internal/frontend/auth/content/ .
 COPY --chown=1001:0 ${BRANDING}/ branding/
-RUN npm ci && npm run build
+RUN npm clean-install --ignore-scripts --no-audit --versbose
+RUN npm run build
 
 # Go builder to build hub binary
 # Copy login page which gets go embedded

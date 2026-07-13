@@ -1,6 +1,18 @@
+# Build login page
+ARG BRANDING=mta-branding
+
+FROM registry.redhat.io/ubi10/nodejs-22:latest AS frontend
+ARG BRANDING
+COPY --chown=1001:0 internal/frontend/auth/content/ .
+COPY --chown=1001:0 ${BRANDING}/ branding/
+RUN npm ci && npm run build
+
+# Go builder to build hub binary
+# Copy login page which gets go embedded
 FROM registry.redhat.io/ubi10/go-toolset:1.23 AS builder
-COPY --chown=1001:0 . /workspace
 WORKDIR /workspace
+COPY --chown=1001:0 . .
+COPY --chown=1001:0 --from=frontend /opt/app-root/src/dist/ internal/frontend/auth/content/dist/
 ENV GOEXPERIMENT strictfipsruntime
 ENV GOFLAGS=-buildvcs=false
 # bin/.build is not being tracked downstream as there is not git tree (.git) directory at build time needed by git describe
@@ -9,6 +21,7 @@ RUN make vet && CGO_ENABLED=1 go build -tags json1,strictfipsruntime -o bin/hub 
 # Remove AKS label from Azure target, assumes Azure is the last target listed
 RUN sed -i -e '/Azure\ Kubernetes\ Service/,$d' /workspace/hack/build/seed/resources/targets.yaml
 
+# Build tini
 # Tini only available in EPEL for now (01/26/2026)
 FROM registry.redhat.io/ubi10:latest as tini-builder
 COPY --from=builder /workspace/hack/build/tini/ /workspace

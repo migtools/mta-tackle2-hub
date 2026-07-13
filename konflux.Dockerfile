@@ -18,7 +18,7 @@ ENV GOFLAGS=-buildvcs=false
 # bin/.build is not being tracked downstream as there is not git tree (.git) directory at build time needed by git describe
 RUN make vet && CGO_ENABLED=1 go build -tags json1,strictfipsruntime -o bin/hub github.com/konveyor/tackle2-hub/cmd
 
-# Remove AKS label from Azure target, assumes Azure is the last target listed
+# Remove AKS label from Azure target inline
 RUN sed -i -e '/Azure\ Kubernetes\ Service/{N;d}' /workspace/hack/build/seed/resources/targets.yaml
 
 # Build tini

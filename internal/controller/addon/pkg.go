@@ -31,7 +31,6 @@ var Log = logr2.WithName(Name)
 // Add the controller.
 func Add(mgr manager.Manager, db *gorm.DB) (err error) {
 	reconciler := &Reconciler{
-		seen:   make(map[string]bool),
 		Client: mgr.GetClient(),
 		Log:    Log,
 		DB:     db,
@@ -47,8 +46,10 @@ func Add(mgr manager.Manager, db *gorm.DB) (err error) {
 		return
 	}
 	err = cnt.Watch(
-		&source.Kind{Type: &Addon{}},
-		&handler.EnqueueRequestForObject{})
+		source.Kind(
+			mgr.GetCache(),
+			&Addon{},
+			&handler.TypedEnqueueRequestForObject[*Addon]{}))
 	if err != nil {
 		Log.Error(err, "")
 		return
@@ -58,14 +59,11 @@ func Add(mgr manager.Manager, db *gorm.DB) (err error) {
 }
 
 // Reconciler reconciles addon CRs.
-// The seen (map) is used to ensure resources are
-// reconciled at least once at startup.
 type Reconciler struct {
 	record.EventRecorder
 	k8s.Client
-	DB   *gorm.DB
-	Log  logr.Logger
-	seen map[string]bool
+	DB  *gorm.DB
+	Log logr.Logger
 }
 
 // Reconcile a Addon CR.
@@ -88,8 +86,7 @@ func (r Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (r
 		}
 		return
 	}
-	_, found := r.seen[addon.Name]
-	if found && addon.Reconciled() {
+	if addon.Reconciled() {
 		return
 	}
 	// Changed
@@ -109,8 +106,6 @@ func (r Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (r
 	if err != nil {
 		return
 	}
-
-	r.seen[addon.Name] = true
 
 	return
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jortel/go-utils/logr"
 	"github.com/konveyor/tackle2-hub/internal/api"
 	"github.com/konveyor/tackle2-hub/internal/auth"
+	"github.com/konveyor/tackle2-hub/internal/controller"
 	"github.com/konveyor/tackle2-hub/internal/database"
 	"github.com/konveyor/tackle2-hub/internal/frontend"
 	"github.com/konveyor/tackle2-hub/internal/heap"
@@ -95,8 +96,13 @@ func Run(e *gin.Engine) (err error) {
 // Note: The initialization order is very important.
 func main() {
 	Log.Info("Started:\n" + Settings.String())
+	ctx := context.Background()
 	var err error
 	defer func() {
+		r := recover()
+		if r != nil {
+			err = liberr.Recovered(r)
+		}
 		if err != nil {
 			Log.Error(err, "")
 		}
@@ -104,7 +110,6 @@ func main() {
 	syscall.Umask(0)
 	debug.SetGCPercent(20)
 	heap.Monitor()
-	//
 	// Model
 	db, err := Setup()
 	if err != nil {
@@ -118,18 +123,15 @@ func main() {
 	}
 	//
 	// Add controller manager.
-	addonManager, aErr := k8s.NewManager(db)
+	k8sManager, aErr := k8s.NewManager()
 	if aErr != nil {
 		err = aErr
 		return
 	}
-	go func() {
-		err = addonManager.Start(context.Background())
-		if err != nil {
-			err = liberr.Wrap(err)
-			return
-		}
-	}()
+	err = controller.Add(k8sManager, db)
+	if err != nil {
+		return
+	}
 	//
 	// k8s client.
 	client, err := k8s.NewClient()
@@ -137,12 +139,18 @@ func main() {
 		err = liberr.Wrap(err)
 		return
 	}
-	// Auth
-	auth.Domain = auth.NewTenant(db)
-	auth.IdP, err = auth.New(db)
+	// Build Auth
+	domain := auth.NewTenant(db, client)
+	err = domain.Load()
 	if err != nil {
 		return
 	}
+	p, err := auth.New(db, domain)
+	if err != nil {
+		return
+	}
+	auth.SetDomain(domain)
+	auth.SetIdp(p)
 	// Document migration.
 	jsdMigrator := migration.DocumentMigrator{
 		DB:     db,
@@ -153,30 +161,20 @@ func main() {
 		return
 	}
 	//
-	// Task
+	// Build Managers.
 	taskManager := task.New(db, client)
-	taskManager.Run(context.Background())
-	//
-	// Reaper
 	reaperManager := reaper.Manager{
 		Client: client,
 		DB:     db,
 	}
-	reaperManager.Run(context.Background())
-	//
-	// Application import.
 	importManager := importer.Manager{
 		DB:          db,
 		TaskManager: taskManager,
 		Client:      client,
 	}
-	importManager.Run(context.Background())
-	//
-	// Ticket trackers.
 	trackerManager := tracker.Manager{
 		DB: db,
 	}
-	trackerManager.Run(context.Background())
 	//
 	// Metrics
 	if Settings.Metrics.Enabled {
@@ -188,7 +186,7 @@ func main() {
 		metricsManager := metrics.Manager{
 			DB: db,
 		}
-		metricsManager.Run(context.Background())
+		metricsManager.Run(ctx)
 	}
 	// Web
 	router := gin.Default()
@@ -211,13 +209,20 @@ func main() {
 	}
 	//
 	// Auth domain.
-	err = auth.Domain.Seed()
+	err = domain.Seed()
 	if err != nil {
 		return
 	}
-	err = auth.IdP.Cache().Refresh()
+	err = auth.Idp().Cache().Refresh()
 	if err != nil {
 		return
 	}
+	// Run Managers.
+	k8sManager.Run(ctx)
+	taskManager.Run(ctx)
+	reaperManager.Run(ctx)
+	importManager.Run(ctx)
+	trackerManager.Run(ctx)
+	// Run Router.
 	err = Run(router)
 }

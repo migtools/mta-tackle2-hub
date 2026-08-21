@@ -94,8 +94,8 @@ Username/password authentication for local users or LDAP users. Credentials vali
 ### 3. Personal Access Tokens (PATs)
 Long-lived API keys created by users for scripting and automation. Managed via `/auth/token` CRUD endpoints.
 
-### 4. Task API Keys
-Short-lived tokens automatically generated for addon task execution. Scoped to task-specific permissions and cleaned up when task completes.
+### 4. Task Tokens
+API key tokens created under the `addon` service account for task execution. Scoped to the addon role's permissions and revoked when the task completes. Each token is tagged with a `TaskID` for lifecycle management.
 
 ---
 
@@ -210,15 +210,16 @@ Complete list of authentication-related environment variables:
 
 ### Core Concepts
 
-The authentication system uses **Subject** as the central abstraction representing an authenticated entity. A Subject is resolved from one of three sources:
+The authentication system uses **Subject** as the central abstraction representing an authenticated entity. A Subject is resolved from one of four sources:
 
 | Source | Description | Use Case |
 |--------|-------------|----------|
 | **User** | Local hub user with role assignments | Hub-managed authentication |
+| **ServiceAccount** | Machine identity with role assignments and API key tokens | Addon/task execution, internal automation |
 | **IdpIdentity** | External identity (LDAP or federated OIDC) | LDAP or external IdP authentication |
 | **IdpClient** | OAuth2 client for machine-to-machine auth | Client credentials grant flow |
 
-**Key principle**: A Subject is **mutually exclusive** — it references either a User, an IdpIdentity, OR an IdpClient, never more than one.
+**Key principle**: A Subject is **mutually exclusive** — it references either a User, a ServiceAccount, an IdpIdentity, OR an IdpClient, never more than one.
 
 ### Terminology: Login, Name, and ID
 
@@ -239,6 +240,7 @@ The term "Login" was chosen to avoid collision and confusion:
 
 **Examples:**
 - Local user: `Login = "admin"`, `Name = "Administrator"`, `ID = 1`
+- Service account: `Name = "addon"`, `ID = 1` (no Login field — identified by Name)
 - LDAP user: `Login = "jsmith"` (from LDAP uid/sAMAccountName), `Name = "John Smith"` (from LDAP cn)
 - External IdP: `Login = "jsmith"` (from preferred_username), `Name = "John Smith"` (from name claim)
 
@@ -248,6 +250,7 @@ The `Login` field follows the **GitHub API pattern**, which uses `"login"` for t
 graph TB
     subgraph "Authentication Sources"
         LocalUser[Local User<br/>username/password]
+        SvcAcct[Service Account<br/>API key token]
         LDAPUser[LDAP User<br/>LDAP credentials]
         FedUser[Federated User<br/>external OIDC]
         OAuthClient[OAuth Client<br/>client credentials]
@@ -255,6 +258,7 @@ graph TB
     
     subgraph "Data Layer"
         UserTable[(User Table)]
+        SATable[(ServiceAccount Table)]
         IdentityTable[(IdpIdentity Table)]
         ClientTable[(IdpClient Table)]
     end
@@ -269,11 +273,13 @@ graph TB
     end
     
     LocalUser --> UserTable
+    SvcAcct --> SATable
     LDAPUser --> IdentityTable
     FedUser --> IdentityTable
     OAuthClient --> ClientTable
     
     UserTable --> SubjectCache
+    SATable --> SubjectCache
     IdentityTable --> SubjectCache
     ClientTable --> SubjectCache
     
@@ -287,10 +293,10 @@ A Subject contains the following information:
 
 | Attribute | Description |
 |-----------|-------------|
-| **Key** | Subject identifier (UUID for User/IdpClient, hash/external subject for IdpIdentity) |
-| **Email** | User's email address (empty for IdpClient) |
+| **Key** | Subject identifier (UUID for User/ServiceAccount/IdpClient, hash/external subject for IdpIdentity) |
+| **Email** | User's email address (empty for ServiceAccount/IdpClient) |
 | **Scopes** | Permission scope strings (JSON array, injected into JWT tokens) |
-| **Source Reference** | Points to either User, IdpIdentity, or IdpClient record (UserId/IdentityId/ClientId) |
+| **Source Reference** | Points to either User, ServiceAccount, IdpIdentity, or IdpClient record (UserId/ServiceAccountId/IdentityId/ClientId) |
 
 ### Subject Derivation
 
@@ -299,6 +305,7 @@ The `Subject` field is the **unique identifier** for an authenticated entity and
 | Authentication Method | Subject Format | Example | Derivation |
 |----------------------|----------------|---------|------------|
 | **Local User** | UUID v4 | `550e8400-e29b-41d4-a716-446655440000` | `uuid.New().String()` via BeforeCreate hook |
+| **Service Account** | UUID v4 | `a1b2c3d4-e5f6-7890-abcd-ef1234567890` | `uuid.New().String()` via seeding or API creation |
 | **OIDC Client (Client Credentials)** | UUID v4 | `d3e8f5a6-7b8c-9d0e-1f2a-3b4c5d6e7f8a` | `uuid.New().String()` via BeforeCreate hook |
 | **OIDC (External IdP)** | IdP subject | `f8e3a2b1-4c5d-6e7f-8a9b-0c1d2e3f4a5b` | External IdP's `sub` claim (as-is) |
 | **LDAP** | HMAC-SHA256 hash | `dsLflKrXRBgaZC3u8XNHJS8UskJ19GM5AWIZ8nBheFA=` | `secret.Hash(login)` |
@@ -316,6 +323,13 @@ The `Subject` field is the **unique identifier** for an authenticated entity and
 - Stable across user's lifetime
 - Standard practice for local identity systems
 - Generated automatically via GORM BeforeCreate hook
+
+*Service Account (UUID):*
+- Same benefits as Local User (uniqueness, opacity, stability)
+- Generated during seeding or API creation
+- Identified by Name (not Login) — service accounts have no password or login flow
+- Authenticates via API key tokens created for the service account
+- Scopes derived from assigned roles (same as User)
 
 *OIDC Client (UUID):*
 - Same benefits as Local User (uniqueness, opacity, stability)
@@ -341,9 +355,9 @@ The `Subject` field is the **unique identifier** for an authenticated entity and
 **Collision resistance:**
 
 The different formats provide natural separation:
-- UUID vs UUID: ~1 in 5.3 × 10^36 probability (negligible)
+- UUID vs UUID: ~1 in 5.3 × 10^36 probability (negligible for User, ServiceAccount, IdpClient)
 - LDAP hash vs OIDC subject: Cryptographically infeasible (HMAC with secret passphrase)
-- All three use database uniqueness constraint on `Subject` field
+- All four use database uniqueness constraint on `Subject` field
 
 ### IdpIdentity Model
 
@@ -394,6 +408,7 @@ Subjects are resolved from cache for performance:
 
 **Cache structure:**
 - Users indexed by subject (UUID)
+- ServiceAccounts indexed by subject (UUID), name, and ID
 - IdpIdentities indexed by subject (login hash for LDAP or external subject for OIDC)
 - IdpClients indexed by subject (UUID)
 - O(1) lookup by subject identifier
@@ -443,6 +458,7 @@ IdpIdentities are automatically refreshed when tokens are refreshed:
 | Identity Kind | Refresh Behavior |
 |---------------|------------------|
 | **Local User** | No refresh needed (roles managed in hub) |
+| **Service Account** | No refresh needed (roles managed in hub) |
 | **LDAP** | Re-authenticate with stored password, fetch fresh group memberships |
 | **OpenID** | Use OAuth refresh token to get updated claims from external IdP |
 
@@ -462,6 +478,18 @@ IdpIdentities are automatically refreshed when tokens are refreshed:
 4. Subject.Key = User.Subject (UUID)
 5. Subject.Scopes = aggregate all scopes from User.Roles (each role's Scopes JSON array)
 6. Subject.source = User reference
+```
+
+**Service Account:**
+```
+1. API key token presented as bearer token
+2. Compute SHA256 hash of token
+3. Lookup token in cache by digest
+4. Token references ServiceAccount via ServiceAccountID
+5. Lookup ServiceAccount in cache by subject
+6. Subject.Key = ServiceAccount.Subject (UUID)
+7. Subject.Scopes = aggregate all scopes from ServiceAccount.Roles
+8. Subject.source = ServiceAccount reference
 ```
 
 **LDAP User:**
@@ -905,11 +933,40 @@ External IdP claims are mapped to hub identity:
 | **email** | Email | Email address |
 | **scope** (access token) | Scopes | Permission scopes extracted from access token |
 
-**Scope extraction:**
-- Hub extracts `scope` claim from IdP access token
-- Scopes are space-separated permission strings
-- Stored in IdpIdentity.Scopes field
-- Injected into hub-issued access tokens when refreshed
+**Scope extraction and expansion:**
+
+The hub extracts the `scope` claim from the IdP access token as a space-separated string, then applies two expansion phases before storing the resolved scopes on the IdpIdentity:
+
+**Phase 1 — Role reference expansion (`+role.<name>`):**
+
+Scopes matching the pattern `+role.<name>` are replaced with the named hub role's permission scopes. This allows IdP administrators to assign hub roles by name without enumerating individual `resource:verb` scopes in the IdP.
+
+| IdP Scope Value | Expansion | Result |
+|-----------------|-----------|--------|
+| `+role.architect` | Looked up in hub role cache by name `architect` | All scopes from the `architect` role |
+| `+role.admin` | Looked up by name `admin` | All scopes from the `admin` role |
+| `+role.unknown` | Role not found — silently skipped (logged) | Omitted from result |
+| `applications:get` | No `+role.` prefix — passed through unchanged | `applications:get` |
+
+**Example:** An external IdP access token with scope `openid profile +role.architect` expands to `openid profile applications:get applications:post applications:put ...` (all scopes defined on the `architect` role).
+
+**Phase 2 — Wildcard expansion:**
+
+After role references are resolved, any remaining wildcard scopes (`*:*`, `applications:*`, `*:get`) are expanded against the hub's registered resources. This is the same expansion used during role seeding (see [Scope Generation](#scope-generation)).
+
+**Combined example:**
+
+```
+IdP scope claim:  "openid +role.migrator applications:*"
+                         ↓                      ↓
+Phase 1 (roles):  "openid tasks:get tasks:post ... applications:*"
+                                                         ↓
+Phase 2 (wildcards): "openid tasks:get tasks:post ... applications:get applications:post ..."
+```
+
+The fully expanded scopes are stored in `IdpIdentity.Scopes` and injected into hub-issued access tokens.
+
+**Configuration:** Role references require no hub-side configuration beyond the standard role definitions in `roles.yaml`. The IdP administrator simply includes `+role.<name>` in the scopes assigned to the user or client at the external IdP.
 
 ### Security Considerations
 
@@ -1347,10 +1404,11 @@ Long-lived authentication artifacts are persisted:
 | Table | Contents | Lifetime | Purpose |
 |-------|----------|----------|---------|
 | **Users** | Local user credentials, roles | Indefinite | Hub-managed authentication |
+| **ServiceAccounts** | Machine identity with roles, API key tokens | Indefinite | Addon/task authentication |
 | **IdpIdentities** | LDAP/federated user mappings | Until user deleted | External authentication |
 | **IdpClients** | OAuth2 client credentials, scopes | Until client deleted | Client credentials grant |
 | **Grants** | Refresh tokens (hashed) | 30 days (default) | Token refresh |
-| **Tokens** | Access tokens, PATs, task keys | Varies by type | API authentication |
+| **Tokens** | Access tokens, PATs, ServiceAccount tokens (including task tokens) | Varies by type | API authentication |
 | **RsaKeys** | JWT signing keys | Until rotated | Token signing |
 
 **Design rationale:**
@@ -1366,6 +1424,7 @@ In-memory cache reduces database load:
 | Cached Data | Index | Refresh Strategy |
 |-------------|-------|------------------|
 | **Users** | By subject, by login | Always on lookup (security) |
+| **ServiceAccounts** | By subject, by name, by ID | Standard lifespan |
 | **IdpIdentities** | By subject | Item expiration + cache lifespan |
 | **IdpClients** | By subject, by ID | Standard lifespan |
 | **Roles** | By ID, by name | Standard lifespan |
@@ -1376,7 +1435,7 @@ In-memory cache reduces database load:
 **Cache invalidation:**
 - Auto-refresh when data not found
 - Auto-refresh when lifespan exceeded
-- Explicit notification on data changes (UserSaved, IdentitySaved, ClientSaved, etc.)
+- Explicit notification on data changes (UserSaved, SaSaved, IdentitySaved, ClientSaved, etc.)
 
 **Why always refresh Users?**
 - Password changes must take effect immediately
@@ -1455,22 +1514,29 @@ User-created API keys for automation:
 - Revocation removes both the token record and any associated OAuth grant
 - More thorough cleanup than simple deletion
 
-### Task API Keys
+### Task Tokens
 
-Automatically generated tokens for addon execution:
+ServiceAccount tokens created for addon task execution. Each token is issued under the `addon` service account and annotated with a `TaskID` for lifecycle management:
 
 | Attribute | Value |
 |-----------|-------|
 | **Format** | Opaque string (random) |
-| **Lifetime** | Tied to task execution |
-| **Scopes** | Task-specific permissions (restricted) |
-| **Cleanup** | Automatic on task completion |
+| **Subject** | Addon ServiceAccount subject (UUID) |
+| **Lifetime** | Tied to task execution (revoked on completion or cancellation) |
+| **Scopes** | Inherited from addon ServiceAccount's role |
+| **ServiceAccountID** | References the addon ServiceAccount |
+| **TaskID** | References the associated task |
 
-**Scope restrictions:**
-- Read-only for most resources
-- Write access to task-specific endpoints
-- No admin capabilities
-- Defined in `AddonScopes` constant
+**Creation flow:**
+1. Task manager looks up the `addon` ServiceAccount by ID
+2. Calls `NewToken()` with the ServiceAccount's subject
+3. Token is stamped with `TaskID` for the specific task
+4. Token secret is injected into the task pod's Kubernetes Secret
+
+**Scope definition:**
+- Permissions defined by the `addon` role in `roles.yaml`
+- Scopes resolved from the addon ServiceAccount's role associations
+- Not defined by a hardcoded constant
 
 ---
 
@@ -2135,11 +2201,12 @@ Error: redirect_uri does not match any registered URIs
 
 ### Overview
 
-The RBAC system automatically maintains scopes, roles, and users at runtime by:
+The RBAC system automatically maintains scopes, roles, users, and service accounts at runtime by:
 
 1. **Generating scopes** from registered API route resources
 2. **Loading roles** from `roles.yaml` with scope references
 3. **Loading users** from `users.yaml` with role references
+4. **Loading service accounts** from `serviceaccounts.yaml` with role references
 
 **Trigger:** `Domain.Seed()` called after route registration completes
 
@@ -2253,6 +2320,28 @@ Users defined in `internal/auth/seed/users.yaml`:
 3. Hash password using bcrypt
 4. Generate UUID subject
 
+### Service Account Definition Format
+
+Service accounts defined in `internal/auth/seed/serviceaccounts.yaml`:
+
+```yaml
+- id: 1
+  name: addon
+  roles:
+    - addon
+```
+
+**Resolution:**
+1. For each role name → lookup role by name
+2. Associate all resolved roles with service account
+3. Generate UUID subject
+
+**Key differences from Users:**
+- No login or password — service accounts authenticate via API key tokens
+- Identified by `name` (not `login`)
+- Tokens created via `/auth/serviceaccounts/:id/tokens` endpoint
+- Default seeded service account `addon` (ID 1) is used by addon/task processes
+
 ### ID Preservation
 
 Two-tier ID system ensures safety:
@@ -2270,7 +2359,7 @@ Two-tier ID system ensures safety:
 
 ### Reconciliation Logic
 
-For each resource type (roles, users):
+For each resource type (roles, users, service accounts):
 
 1. **Read** existing from database
 2. **Read** desired from source (YAML)
@@ -2318,6 +2407,13 @@ This section documents the permissions granted to each predefined role.
 - `put` / `patch` → Update
 - `delete` → Delete
 
+**Symbol legend:**
+- ✅ — Role has permission for this operation
+- ❌ — Endpoint exists but role lacks permission
+- ➖ — No endpoint registered for this operation
+
+**Note:** `applications.tags` uses `Required("applications")` scope, so its permissions are governed by the role's `applications` verbs.
+
 ### 🛡 Role: admin
 
 Full administrative access to **all resources and all operations** via wildcard scopes (`*:*`).
@@ -2330,38 +2426,46 @@ This grants the admin role every permission in the system, including:
 
 | Resource | Create | Read | Update | Delete |
 |----------|--------|------|--------|--------|
-| addons | ✅ | ✅ | ✅ | ✅ |
-| adoptionplans | ✅ | ❌ | ❌ | ❌ |
-| analyses | ✅ | ✅ | ✅ | ✅ |
+| addons | ➖ | ✅ | ➖ | ➖ |
+| adoptionplans | ✅ | ➖ | ➖ | ➖ |
+| analyses | ✅ | ✅ | ➖ | ✅ |
+| analysis.profiles | ✅ | ✅ | ✅ | ✅ |
 | applications | ✅ | ✅ | ✅ | ✅ |
-| applications.analyses | ✅ | ✅ | ✅ | ✅ |
-| applications.assessments | ✅ | ✅ | ❌ | ❌ |
+| applications.analyses | ✅ | ✅ | ➖ | ➖ |
+| applications.assessments | ✅ | ✅ | ➖ | ➖ |
 | applications.bucket | ✅ | ✅ | ✅ | ✅ |
 | applications.facts | ✅ | ✅ | ✅ | ✅ |
-| applications.manifests | ✅ | ✅ | ❌ | ❌ |
-| applications.stakeholders | ❌ | ❌ | ✅ | ❌ |
+| applications.manifests | ✅ | ✅ | ➖ | ➖ |
+| applications.stakeholders | ➖ | ➖ | ✅ | ➖ |
 | applications.tags | ✅ | ✅ | ✅ | ✅ |
 | archetypes | ✅ | ✅ | ✅ | ✅ |
-| archetypes.assessments | ✅ | ✅ | ❌ | ❌ |
-| assessments | ✅ | ✅ | ✅ | ✅ |
+| archetypes.assessments | ✅ | ✅ | ➖ | ➖ |
+| assessments | ➖ | ✅ | ✅ | ✅ |
 | buckets | ✅ | ✅ | ✅ | ✅ |
 | businessservices | ✅ | ✅ | ✅ | ✅ |
-| cache | ❌ | ✅ | ❌ | ✅ |
-| dependencies | ✅ | ✅ | ✅ | ✅ |
+| cache | ➖ | ✅ | ➖ | ✅ |
+| configmaps | ➖ | ✅ | ➖ | ➖ |
+| dependencies | ✅ | ✅ | ➖ | ✅ |
 | files | ✅ | ✅ | ✅ | ✅ |
 | generators | ✅ | ✅ | ✅ | ✅ |
+| grants | ➖ | ✅ | ➖ | ✅ |
 | identities | ✅ | ✅ | ✅ | ✅ |
-| imports | ✅ | ✅ | ✅ | ✅ |
+| idp.clients | ✅ | ✅ | ✅ | ✅ |
+| idp.identities | ✅ | ✅ | ✅ | ✅ |
+| imports | ✅ | ✅ | ➖ | ✅ |
 | jobfunctions | ✅ | ✅ | ✅ | ✅ |
-| kai | ✅ | ✅ | ❌ | ❌ |
 | manifests | ✅ | ✅ | ✅ | ✅ |
 | migrationwaves | ✅ | ✅ | ✅ | ✅ |
 | platforms | ✅ | ✅ | ✅ | ✅ |
 | proxies | ✅ | ✅ | ✅ | ✅ |
 | questionnaires | ✅ | ✅ | ✅ | ✅ |
 | reviews | ✅ | ✅ | ✅ | ✅ |
+| roles | ✅ | ✅ | ✅ | ✅ |
 | rulesets | ✅ | ✅ | ✅ | ✅ |
-| schemas | ✅ | ✅ | ✅ | ✅ |
+| schemas | ➖ | ✅ | ➖ | ➖ |
+| scopes | ➖ | ✅ | ➖ | ➖ |
+| serviceaccounts | ✅ | ✅ | ✅ | ✅ |
+| serviceaccounts.tokens | ✅ | ➖ | ➖ | ➖ |
 | settings | ✅ | ✅ | ✅ | ✅ |
 | stakeholdergroups | ✅ | ✅ | ✅ | ✅ |
 | stakeholders | ✅ | ✅ | ✅ | ✅ |
@@ -2370,47 +2474,58 @@ This grants the admin role every permission in the system, including:
 | targets | ✅ | ✅ | ✅ | ✅ |
 | tasks | ✅ | ✅ | ✅ | ✅ |
 | tasks.bucket | ✅ | ✅ | ✅ | ✅ |
-| tickets | ✅ | ✅ | ✅ | ✅ |
+| tasks.report | ✅ | ✅ | ✅ | ✅ |
+| tickets | ✅ | ✅ | ➖ | ✅ |
+| tokens | ✅ | ✅ | ➖ | ✅ |
 | trackers | ✅ | ✅ | ✅ | ✅ |
+| users | ✅ | ✅ | ✅ | ✅ |
 
 ### 🛠 Role: architect
 
-Broad create/update/delete rights, restricted on sensitive resources (identities, proxies, settings, trackers).
+Broad create/update/delete rights, restricted on sensitive resources (identities, proxies, settings, trackers, auth management).
 
 | Resource | Create | Read | Update | Delete |
 |----------|--------|------|--------|--------|
-| addons | ✅ | ✅ | ✅ | ✅ |
-| adoptionplans | ✅ | ❌ | ❌ | ❌ |
-| analyses | ✅ | ✅ | ✅ | ✅ |
+| addons | ➖ | ✅ | ➖ | ➖ |
+| adoptionplans | ✅ | ➖ | ➖ | ➖ |
+| analyses | ✅ | ✅ | ➖ | ✅ |
+| analysis.profiles | ✅ | ✅ | ✅ | ✅ |
 | applications | ✅ | ✅ | ✅ | ✅ |
-| applications.analyses | ✅ | ✅ | ✅ | ✅ |
-| applications.assessments | ✅ | ✅ | ❌ | ❌ |
+| applications.analyses | ✅ | ✅ | ➖ | ➖ |
+| applications.assessments | ✅ | ✅ | ➖ | ➖ |
 | applications.bucket | ✅ | ✅ | ✅ | ✅ |
 | applications.facts | ✅ | ✅ | ✅ | ✅ |
-| applications.manifests | ✅ | ✅ | ❌ | ❌ |
-| applications.stakeholders | ❌ | ❌ | ✅ | ❌ |
+| applications.manifests | ✅ | ✅ | ➖ | ➖ |
+| applications.stakeholders | ➖ | ➖ | ✅ | ➖ |
 | applications.tags | ✅ | ✅ | ✅ | ✅ |
 | archetypes | ✅ | ✅ | ✅ | ✅ |
-| archetypes.assessments | ✅ | ✅ | ❌ | ❌ |
-| assessments | ✅ | ✅ | ✅ | ✅ |
+| archetypes.assessments | ✅ | ✅ | ➖ | ➖ |
+| assessments | ➖ | ✅ | ✅ | ✅ |
 | buckets | ✅ | ✅ | ✅ | ✅ |
 | businessservices | ✅ | ✅ | ✅ | ✅ |
-| cache | ❌ | ✅ | ❌ | ❌ |
-| dependencies | ✅ | ✅ | ✅ | ✅ |
+| cache | ➖ | ✅ | ➖ | ❌ |
+| configmaps | ➖ | ✅ | ➖ | ➖ |
+| dependencies | ✅ | ✅ | ➖ | ✅ |
 | files | ✅ | ✅ | ✅ | ✅ |
 | generators | ✅ | ✅ | ✅ | ✅ |
+| grants | ➖ | ❌ | ➖ | ❌ |
 | identities | ❌ | ✅ | ❌ | ❌ |
-| imports | ✅ | ✅ | ✅ | ✅ |
+| idp.clients | ❌ | ❌ | ❌ | ❌ |
+| idp.identities | ❌ | ❌ | ❌ | ❌ |
+| imports | ✅ | ✅ | ➖ | ✅ |
 | jobfunctions | ✅ | ✅ | ✅ | ✅ |
-| kai | ✅ | ✅ | ❌ | ❌ |
 | manifests | ✅ | ✅ | ✅ | ✅ |
 | migrationwaves | ✅ | ✅ | ✅ | ✅ |
 | platforms | ✅ | ✅ | ✅ | ✅ |
 | proxies | ❌ | ✅ | ❌ | ❌ |
 | questionnaires | ❌ | ✅ | ❌ | ❌ |
 | reviews | ✅ | ✅ | ✅ | ✅ |
+| roles | ❌ | ✅ | ❌ | ❌ |
 | rulesets | ✅ | ✅ | ✅ | ✅ |
-| schemas | ❌ | ✅ | ❌ | ❌ |
+| schemas | ➖ | ✅ | ➖ | ➖ |
+| scopes | ➖ | ✅ | ➖ | ➖ |
+| serviceaccounts | ❌ | ❌ | ❌ | ❌ |
+| serviceaccounts.tokens | ❌ | ➖ | ➖ | ➖ |
 | settings | ❌ | ✅ | ❌ | ❌ |
 | stakeholdergroups | ✅ | ✅ | ✅ | ✅ |
 | stakeholders | ✅ | ✅ | ✅ | ✅ |
@@ -2419,8 +2534,11 @@ Broad create/update/delete rights, restricted on sensitive resources (identities
 | targets | ✅ | ✅ | ✅ | ✅ |
 | tasks | ✅ | ✅ | ✅ | ✅ |
 | tasks.bucket | ✅ | ✅ | ✅ | ✅ |
-| tickets | ✅ | ✅ | ✅ | ✅ |
+| tasks.report | ❌ | ❌ | ❌ | ❌ |
+| tickets | ✅ | ✅ | ➖ | ✅ |
+| tokens | ✅ | ✅ | ➖ | ✅ |
 | trackers | ❌ | ✅ | ❌ | ❌ |
+| users | ❌ | ✅ | ✅ | ✅ |
 
 ### 🚚 Role: migrator
 
@@ -2428,37 +2546,46 @@ Mostly read-only, except full management of dependencies and tasks.
 
 | Resource | Create | Read | Update | Delete |
 |----------|--------|------|--------|--------|
-| addons | ❌ | ✅ | ❌ | ❌ |
-| adoptionplans | ✅ | ❌ | ❌ | ❌ |
-| analyses | ❌ | ✅ | ❌ | ❌ |
+| addons | ➖ | ✅ | ➖ | ➖ |
+| adoptionplans | ✅ | ➖ | ➖ | ➖ |
+| analyses | ❌ | ✅ | ➖ | ❌ |
+| analysis.profiles | ❌ | ✅ | ❌ | ❌ |
 | applications | ❌ | ✅ | ❌ | ❌ |
-| applications.analyses | ❌ | ✅ | ❌ | ❌ |
-| applications.assessments | ❌ | ✅ | ❌ | ❌ |
+| applications.analyses | ❌ | ✅ | ➖ | ➖ |
+| applications.assessments | ❌ | ✅ | ➖ | ➖ |
 | applications.bucket | ❌ | ✅ | ❌ | ❌ |
 | applications.facts | ❌ | ✅ | ❌ | ❌ |
-| applications.manifests | ❌ | ✅ | ❌ | ❌ |
+| applications.manifests | ❌ | ✅ | ➖ | ➖ |
+| applications.stakeholders | ➖ | ➖ | ❌ | ➖ |
 | applications.tags | ❌ | ✅ | ❌ | ❌ |
 | archetypes | ❌ | ✅ | ❌ | ❌ |
-| archetypes.assessments | ❌ | ✅ | ❌ | ❌ |
-| assessments | ❌ | ✅ | ❌ | ❌ |
+| archetypes.assessments | ❌ | ✅ | ➖ | ➖ |
+| assessments | ➖ | ✅ | ❌ | ❌ |
 | buckets | ❌ | ✅ | ❌ | ❌ |
 | businessservices | ❌ | ✅ | ❌ | ❌ |
-| cache | ❌ | ✅ | ❌ | ❌ |
-| dependencies | ✅ | ✅ | ✅ | ✅ |
+| cache | ➖ | ✅ | ➖ | ❌ |
+| configmaps | ➖ | ✅ | ➖ | ➖ |
+| dependencies | ✅ | ✅ | ➖ | ✅ |
 | files | ❌ | ✅ | ❌ | ❌ |
 | generators | ❌ | ✅ | ❌ | ❌ |
+| grants | ➖ | ❌ | ➖ | ❌ |
 | identities | ❌ | ✅ | ❌ | ❌ |
-| imports | ❌ | ✅ | ❌ | ❌ |
+| idp.clients | ❌ | ❌ | ❌ | ❌ |
+| idp.identities | ❌ | ❌ | ❌ | ❌ |
+| imports | ❌ | ✅ | ➖ | ❌ |
 | jobfunctions | ❌ | ✅ | ❌ | ❌ |
-| kai | ✅ | ✅ | ❌ | ❌ |
 | manifests | ❌ | ✅ | ❌ | ❌ |
 | migrationwaves | ❌ | ✅ | ❌ | ❌ |
 | platforms | ❌ | ✅ | ❌ | ❌ |
 | proxies | ❌ | ✅ | ❌ | ❌ |
 | questionnaires | ❌ | ✅ | ❌ | ❌ |
 | reviews | ❌ | ✅ | ❌ | ❌ |
+| roles | ❌ | ✅ | ❌ | ❌ |
 | rulesets | ❌ | ✅ | ❌ | ❌ |
-| schemas | ❌ | ✅ | ❌ | ❌ |
+| schemas | ➖ | ✅ | ➖ | ➖ |
+| scopes | ➖ | ✅ | ➖ | ➖ |
+| serviceaccounts | ❌ | ❌ | ❌ | ❌ |
+| serviceaccounts.tokens | ❌ | ➖ | ➖ | ➖ |
 | settings | ❌ | ✅ | ❌ | ❌ |
 | stakeholdergroups | ❌ | ✅ | ❌ | ❌ |
 | stakeholders | ❌ | ✅ | ❌ | ❌ |
@@ -2467,8 +2594,11 @@ Mostly read-only, except full management of dependencies and tasks.
 | targets | ❌ | ✅ | ❌ | ❌ |
 | tasks | ✅ | ✅ | ✅ | ✅ |
 | tasks.bucket | ✅ | ✅ | ✅ | ✅ |
-| tickets | ❌ | ✅ | ❌ | ❌ |
+| tasks.report | ❌ | ❌ | ❌ | ❌ |
+| tickets | ❌ | ✅ | ➖ | ❌ |
+| tokens | ✅ | ✅ | ➖ | ✅ |
 | trackers | ❌ | ✅ | ❌ | ❌ |
+| users | ❌ | ✅ | ✅ | ✅ |
 
 ### 📋 Role: project-manager
 
@@ -2476,35 +2606,46 @@ Read-only for most resources, can update application stakeholders and fully mana
 
 | Resource | Create | Read | Update | Delete |
 |----------|--------|------|--------|--------|
-| addons | ❌ | ✅ | ❌ | ❌ |
-| adoptionplans | ✅ | ❌ | ❌ | ❌ |
+| addons | ➖ | ✅ | ➖ | ➖ |
+| adoptionplans | ✅ | ➖ | ➖ | ➖ |
+| analyses | ❌ | ✅ | ➖ | ❌ |
+| analysis.profiles | ❌ | ✅ | ❌ | ❌ |
 | applications | ❌ | ✅ | ❌ | ❌ |
-| applications.analyses | ❌ | ✅ | ❌ | ❌ |
-| applications.assessments | ❌ | ✅ | ❌ | ❌ |
+| applications.analyses | ❌ | ✅ | ➖ | ➖ |
+| applications.assessments | ❌ | ✅ | ➖ | ➖ |
 | applications.bucket | ❌ | ✅ | ❌ | ❌ |
 | applications.facts | ❌ | ✅ | ❌ | ❌ |
-| applications.manifests | ❌ | ✅ | ❌ | ❌ |
-| applications.stakeholders | ❌ | ❌ | ✅ | ❌ |
+| applications.manifests | ❌ | ✅ | ➖ | ➖ |
+| applications.stakeholders | ➖ | ➖ | ✅ | ➖ |
 | applications.tags | ❌ | ✅ | ❌ | ❌ |
 | archetypes | ❌ | ✅ | ❌ | ❌ |
-| archetypes.assessments | ❌ | ✅ | ❌ | ❌ |
-| assessments | ❌ | ✅ | ❌ | ❌ |
+| archetypes.assessments | ❌ | ✅ | ➖ | ➖ |
+| assessments | ➖ | ✅ | ❌ | ❌ |
 | buckets | ❌ | ✅ | ❌ | ❌ |
 | businessservices | ❌ | ✅ | ❌ | ❌ |
-| cache | ❌ | ✅ | ❌ | ❌ |
-| dependencies | ❌ | ✅ | ❌ | ❌ |
+| cache | ➖ | ✅ | ➖ | ❌ |
+| configmaps | ➖ | ✅ | ➖ | ➖ |
+| dependencies | ❌ | ✅ | ➖ | ❌ |
+| files | ❌ | ✅ | ❌ | ❌ |
 | generators | ❌ | ✅ | ❌ | ❌ |
+| grants | ➖ | ❌ | ➖ | ❌ |
 | identities | ❌ | ✅ | ❌ | ❌ |
-| imports | ❌ | ✅ | ❌ | ❌ |
+| idp.clients | ❌ | ❌ | ❌ | ❌ |
+| idp.identities | ❌ | ❌ | ❌ | ❌ |
+| imports | ❌ | ✅ | ➖ | ❌ |
 | jobfunctions | ❌ | ✅ | ❌ | ❌ |
-| kai | ✅ | ✅ | ❌ | ❌ |
+| manifests | ❌ | ❌ | ❌ | ❌ |
 | migrationwaves | ✅ | ✅ | ✅ | ✅ |
 | platforms | ❌ | ✅ | ❌ | ❌ |
 | proxies | ❌ | ✅ | ❌ | ❌ |
 | questionnaires | ❌ | ✅ | ❌ | ❌ |
 | reviews | ❌ | ✅ | ❌ | ❌ |
+| roles | ❌ | ❌ | ❌ | ❌ |
 | rulesets | ❌ | ✅ | ❌ | ❌ |
-| schemas | ❌ | ✅ | ❌ | ❌ |
+| schemas | ➖ | ❌ | ➖ | ➖ |
+| scopes | ➖ | ❌ | ➖ | ➖ |
+| serviceaccounts | ❌ | ❌ | ❌ | ❌ |
+| serviceaccounts.tokens | ❌ | ➖ | ➖ | ➖ |
 | settings | ❌ | ✅ | ❌ | ❌ |
 | stakeholdergroups | ❌ | ✅ | ❌ | ❌ |
 | stakeholders | ❌ | ✅ | ❌ | ❌ |
@@ -2513,5 +2654,9 @@ Read-only for most resources, can update application stakeholders and fully mana
 | targets | ❌ | ✅ | ❌ | ❌ |
 | tasks | ❌ | ✅ | ❌ | ❌ |
 | tasks.bucket | ❌ | ✅ | ❌ | ❌ |
-| tickets | ❌ | ✅ | ❌ | ❌ |
+| tasks.report | ❌ | ❌ | ❌ | ❌ |
+| tickets | ❌ | ✅ | ➖ | ❌ |
+| tokens | ✅ | ✅ | ➖ | ✅ |
 | trackers | ❌ | ✅ | ❌ | ❌ |
+| users | ❌ | ✅ | ✅ | ✅ |
+

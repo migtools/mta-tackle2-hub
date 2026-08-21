@@ -152,7 +152,7 @@ type IdpIdentity struct {
 	Name     string   `json:"name"`
 	Email    string   `json:"email"`
 	Scopes   []string `json:"scopes"`
-	Tokens   []Ref    `json:"tokens"`
+	Tokens   []Ref    `json:"tokens" binding:"dive"`
 }
 
 // IdpClient REST resource.
@@ -164,7 +164,7 @@ type IdpClient struct {
 	Grants          []string `json:"grants" binding:"required"`
 	RedirectURIs    []string `json:"redirectURIs,omitempty"`
 	Scopes          []string `json:"scopes" binding:"required"`
-	Tokens          []Ref    `json:"tokens"`
+	Tokens          []Ref    `json:"tokens" binding:"dive"`
 }
 
 // User REST resource.
@@ -175,8 +175,18 @@ type User struct {
 	Name     string `json:"name"`
 	Password string `json:"password" binding:"required,max=72"`
 	Email    string `json:"email" binding:"required"`
-	Roles    []Ref  `json:"roles"`
-	Tokens   []Ref  `json:"tokens"`
+	Roles    []Ref  `json:"roles" binding:"dive"`
+	Tokens   []Ref  `json:"tokens" binding:"dive"`
+}
+
+// ServiceAccount REST resource.
+type ServiceAccount struct {
+	Resource    `yaml:",inline"`
+	Description string `json:"description,omitempty" yaml:",omitempty"`
+	Subject     string `json:"subject"`
+	Name        string `json:"name" binding:"required"`
+	Roles       []Ref  `json:"roles" binding:"dive"`
+	Tokens      []Ref  `json:"tokens" binding:"dive"`
 }
 
 // Role REST resource.
@@ -205,32 +215,35 @@ type Grant struct {
 	User        *Ref      `json:"user,omitempty" yaml:",omitempty"`
 	IdpIdentity *Ref      `json:"idpIdentity,omitempty" yaml:",omitempty"`
 	IdpClient   *Ref      `json:"idpClient,omitempty" yaml:",omitempty"`
-	Tokens      []Ref     `json:"tokens,omitempty" yaml:",omitempty"`
+	Tokens      []Ref     `json:"tokens,omitempty" yaml:",omitempty" binding:"dive"`
 }
 
 // Token REST resource.
 type Token struct {
-	Resource    `yaml:",inline"`
-	Kind        string    `json:"kind"`
-	AuthId      string    `json:"authId,omitempty" yaml:"authId,omitempty"`
-	Subject     string    `json:"subject,omitempty" yaml:",omitempty"`
-	Scopes      []string  `json:"scopes,omitempty" yaml:",omitempty"`
-	Issued      time.Time `json:"issued,omitempty" yaml:",omitempty"`
-	Expiration  time.Time `json:"expiration,omitempty" yaml:",omitempty"`
-	Lifespan    int       `json:"lifespan,omitempty" yaml:",omitempty"`
-	Grant       *Ref      `json:"grant,omitempty" yaml:"grant,omitempty"`
-	Task        *Ref      `json:"task,omitempty" yaml:"task,omitempty"`
-	User        *Ref      `json:"user,omitempty" yaml:"user,omitempty"`
-	IdpIdentity *Ref      `json:"idpIdentity,omitempty" yaml:"idpIdentity,omitempty"`
-	IdpClient   *Ref      `json:"idpClient,omitempty" yaml:"idpClient,omitempty"`
+	Resource       `yaml:",inline"`
+	Description    string    `json:"description,omitempty" yaml:",omitempty"`
+	Kind           string    `json:"kind"`
+	AuthId         string    `json:"authId,omitempty" yaml:"authId,omitempty"`
+	Subject        string    `json:"subject,omitempty" yaml:",omitempty"`
+	Scopes         []string  `json:"scopes,omitempty" yaml:",omitempty"`
+	Issued         time.Time `json:"issued,omitempty" yaml:",omitempty"`
+	Expiration     time.Time `json:"expiration,omitempty" yaml:",omitempty"`
+	Lifespan       int       `json:"lifespan,omitempty" yaml:",omitempty"`
+	Grant          *Ref      `json:"grant,omitempty" yaml:"grant,omitempty"`
+	Task           *Ref      `json:"task,omitempty" yaml:"task,omitempty"`
+	User           *Ref      `json:"user,omitempty" yaml:"user,omitempty"`
+	ServiceAccount *Ref      `json:"serviceAccount,omitempty" yaml:"serviceAccount,omitempty"`
+	IdpIdentity    *Ref      `json:"idpIdentity,omitempty" yaml:"idpIdentity,omitempty"`
+	IdpClient      *Ref      `json:"idpClient,omitempty" yaml:"idpClient,omitempty"`
 }
 
 // PAT REST resource.
 type PAT struct {
-	ID         uint      `json:"id,omitempty" yaml:",omitempty"`
-	Lifespan   int       `json:"lifespan,omitempty" yaml:",omitempty"`
-	Expiration time.Time `json:"expiration,omitempty" yaml:",omitempty"`
-	Token      string    `json:"token,omitempty" yaml:",omitempty"`
+	ID          uint      `json:"id,omitempty" yaml:",omitempty"`
+	Description string    `json:"description,omitempty" yaml:",omitempty"`
+	Lifespan    int       `json:"lifespan,omitempty" yaml:",omitempty"`
+	Expiration  time.Time `json:"expiration,omitempty" yaml:",omitempty"`
+	Token       string    `json:"token,omitempty" yaml:",omitempty"`
 }
 
 // String returns the token.

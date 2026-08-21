@@ -6,6 +6,8 @@ import (
 	"os/user"
 	"strconv"
 	"time"
+
+	liberr "github.com/jortel/go-utils/error"
 )
 
 const (
@@ -28,6 +30,7 @@ const (
 	EnvTaskSA                  = "TASK_SA"
 	EnvTaskRetries             = "TASK_RETRIES"
 	EnvTaskUid                 = "TASK_UID"
+	EnvTaskTokenLifespan       = "TASK_TOKEN_LIFESPAN"
 	EnvFrequencyTask           = "FREQUENCY_TASK"
 	EnvFrequencyReaper         = "FREQUENCY_REAPER"
 	EnvFrequencyHeap           = "FREQUENCY_HEAP"
@@ -87,9 +90,10 @@ type Hub struct {
 	}
 	// Task
 	Task struct {
-		SA      string
-		Retries int
-		Reaper  struct {
+		SA            string
+		Retries       int
+		TokenLifespan time.Duration
+		Reaper        struct {
 			Created   time.Duration
 			Succeeded time.Duration
 			Failed    time.Duration
@@ -286,6 +290,19 @@ func (r *Hub) Load() (err error) {
 		}
 		r.Task.UID = uid
 	}
+	s, found = os.LookupEnv(EnvTaskTokenLifespan)
+	if found {
+		var n int
+		n, err = strconv.Atoi(s)
+		if err != nil {
+			err = liberr.Wrap(err)
+			return
+		}
+		n = max(1, n)
+		r.Task.TokenLifespan = time.Duration(n) * time.Hour
+	} else {
+		r.Task.TokenLifespan = time.Hour * 72 // 3 days.
+	}
 	s, found = os.LookupEnv(EnvDisconnected)
 	if found {
 		b, _ := strconv.ParseBool(s)
@@ -380,7 +397,7 @@ func (r *Hub) Load() (err error) {
 		n, _ := strconv.Atoi(s)
 		r.Log.Auth = n
 	} else {
-		r.Log.Auth = r.Log.Master
+		r.Log.Auth = max(r.Log.Master, 1)
 	}
 	s, found = os.LookupEnv(EnvLogCmd)
 	if found {
@@ -394,14 +411,14 @@ func (r *Hub) Load() (err error) {
 		n, _ := strconv.Atoi(s)
 		r.Log.SSH = n
 	} else {
-		r.Log.SSH = r.Log.Master
+		r.Log.SSH = max(r.Log.Master, 1)
 	}
 	s, found = os.LookupEnv(EnvLogScm)
 	if found {
 		n, _ := strconv.Atoi(s)
 		r.Log.SCM = n
 	} else {
-		r.Log.SCM = r.Log.Master
+		r.Log.SCM = max(r.Log.Master, 1)
 	}
 	return
 }

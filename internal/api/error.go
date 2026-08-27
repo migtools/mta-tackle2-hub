@@ -18,6 +18,7 @@ import (
 	"github.com/konveyor/tackle2-hub/shared/command"
 	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
+	k8serr "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // BadRequestError reports bad request errors.
@@ -30,8 +31,7 @@ func (r *BadRequestError) Error() string {
 }
 
 func (r *BadRequestError) Is(err error) (matched bool) {
-	var target *BadRequestError
-	matched = errors.As(err, &target)
+	_, matched = err.(*BadRequestError)
 	return
 }
 
@@ -45,8 +45,7 @@ func (r *Forbidden) Error() string {
 }
 
 func (r *Forbidden) Is(err error) (matched bool) {
-	var target *Forbidden
-	matched = errors.As(err, &target)
+	_, matched = err.(*Forbidden)
 	return
 }
 
@@ -61,8 +60,7 @@ func (r *NotFound) Error() string {
 }
 
 func (r *NotFound) Is(err error) (matched bool) {
-	var target *NotFound
-	matched = errors.As(err, &target)
+	_, matched = err.(*NotFound)
 	return
 }
 
@@ -82,8 +80,7 @@ func (r *BatchError) Error() string {
 }
 
 func (r *BatchError) Is(err error) (matched bool) {
-	var target *BatchError
-	matched = errors.As(err, &target)
+	_, matched = err.(*BatchError)
 	return
 }
 
@@ -98,8 +95,22 @@ func (r *TrackerError) Error() string {
 }
 
 func (r *TrackerError) Is(err error) (matched bool) {
-	var target *TrackerError
-	matched = errors.As(err, &target)
+	_, matched = err.(*TrackerError)
+	return
+}
+
+// NotAvailableError reports resource not available.
+type NotAvailableError struct {
+	Name   string
+	Reason string
+}
+
+func (r *NotAvailableError) Error() string {
+	return r.Reason
+}
+
+func (r *NotAvailableError) Is(err error) (matched bool) {
+	_, matched = err.(*NotAvailableError)
 	return
 }
 
@@ -133,7 +144,8 @@ func ErrorHandler() gin.HandlerFunc {
 		if errors.Is(err, gorm.ErrRecordNotFound) ||
 			errors.Is(err, &NotFound{}) ||
 			errors.Is(err, &auth.NotFound{}) ||
-			errors.Is(err, &jsd.NotFound{}) {
+			errors.Is(err, &jsd.NotFound{}) ||
+			k8serr.IsNotFound(err.Err) {
 			if ctx.Request.Method == http.MethodDelete {
 				rtx.Status(http.StatusNoContent)
 				return
@@ -195,6 +207,15 @@ func ErrorHandler() gin.HandlerFunc {
 		if errors.Is(err, &Forbidden{}) {
 			rtx.Respond(
 				http.StatusForbidden,
+				gin.H{
+					"error": err.Error(),
+				})
+			return
+		}
+
+		if errors.Is(err, &NotAvailableError{}) {
+			rtx.Respond(
+				http.StatusServiceUnavailable,
 				gin.H{
 					"error": err.Error(),
 				})

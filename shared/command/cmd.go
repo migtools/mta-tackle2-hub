@@ -33,6 +33,8 @@ type Command struct {
 	Path    string
 	Dir     string
 	Env     []string
+	Param   map[string]string
+	Reader  io.Reader
 	Writer  io.Writer
 	Error   error
 	Begin   func() error
@@ -64,9 +66,10 @@ func (r *Command) RunWith(ctx context.Context) (err error) {
 	if r.Writer == nil {
 		r.Writer = &Buffer{}
 	}
-	cmd := exec.CommandContext(ctx, r.Path, r.Options...)
+	cmd := exec.CommandContext(ctx, r.Path, r.options()...)
 	cmd.Dir = r.Dir
 	cmd.Env = r.Env
+	cmd.Stdin = r.Reader
 	cmd.Stdout = r.Writer
 	cmd.Stderr = r.Writer
 	err = cmd.Start()
@@ -86,6 +89,15 @@ func (r *Command) RunWith(ctx context.Context) (err error) {
 		return
 	}
 	return
+}
+
+// Set a parameter.
+// Referenced as ${k} and expanded in options().
+func (r *Command) Set(key string, value string) {
+	if r.Param == nil {
+		r.Param = make(map[string]string)
+	}
+	r.Param[key] = value
 }
 
 // Output returns the command output.
@@ -130,6 +142,22 @@ func (r *Command) String() (s string) {
 		parts = append(parts, r.Error.Error())
 	}
 	s = strings.Join(parts, " ")
+	return
+}
+
+// options returns options with referenced params ${k} expanded.
+func (r *Command) options() (expanded []string) {
+	expanded = make([]string, len(r.Options))
+	for i, opt := range r.Options {
+		for k, v := range r.Param {
+			opt = strings.Replace(
+				opt,
+				"${"+k+"}",
+				v,
+				-1)
+		}
+		expanded[i] = opt
+	}
 	return
 }
 

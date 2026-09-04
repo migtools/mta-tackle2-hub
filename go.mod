@@ -16,7 +16,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/jortel/go-utils v0.1.5
-	github.com/konveyor/agentic-controller/api v0.0.0-20260810121904-72f126d1c913
+	github.com/konveyor/agentic-controller/api v0.0.0-20260826225318-22fee4931905
 	github.com/konveyor/tackle2-hub/shared v0.0.0
 	github.com/konveyor/tackle2-seed v0.0.0-20250825214317-99de80681f88
 	github.com/mattn/go-sqlite3 v1.14.17
@@ -27,7 +27,7 @@ require (
 	github.com/swaggo/swag v1.16.1
 	github.com/vfaronov/httpheader v0.1.0
 	github.com/zitadel/oidc/v3 v3.47.2
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	gopkg.in/op/go-logging.v1 v1.0.0-20160211212156-b2cb9fa56473
 	gopkg.in/yaml.v2 v2.4.0
@@ -130,13 +130,13 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
+	golang.org/x/tools v0.48.0 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect

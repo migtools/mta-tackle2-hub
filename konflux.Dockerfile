@@ -23,7 +23,7 @@ RUN mkdir -p /hub && chmod 0777 /hub
 ENV HOME=/hub
 WORKDIR /hub
 ARG VERSION=${BUILD_VERSION}
-RUN dnf -y install openssl sqlite openssh-clients subversion git tar && dnf -y clean all
+RUN dnf -y install sqlite openssh-clients subversion git tar && dnf -y clean all
 RUN echo "hub:x:1001:0:hub:/:/sbin/nologin" >> /etc/passwd
 
 COPY --from=tini-builder /workspace/tini /usr/bin/tini

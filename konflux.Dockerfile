@@ -11,7 +11,7 @@ RUN npm run build
 
 # Go builder to build hub binary
 # Copy login page which gets go embedded
-FROM registry.redhat.io/ubi10/go-toolset:1.23 AS builder
+FROM registry.redhat.io/ubi10/go-toolset:1.26 AS builder
 WORKDIR /workspace
 COPY --chown=1001:0 . .
 COPY --chown=1001:0 --from=frontend /opt/app-root/src/dist/ internal/frontend/auth/content/dist/

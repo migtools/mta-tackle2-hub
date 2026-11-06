@@ -88,6 +88,7 @@ func buildRecorder(client k8sclient.Client) (m *record.Manager, err error) {
 		return
 	}
 	ns := Settings.Hub.Namespace
+	api.AgentRunLogOpener = record.KubeLogOpener(clientSet, ns)
 	m = &record.Manager{
 		Client: client,
 		Store:  &record.Store{Root: filepath.Join(Settings.Hub.Bucket.Path, "agentruns")},

@@ -11,11 +11,17 @@ import (
 // TranscriptAllowed reports whether the run transcript may be recorded.
 // Runs in approve mode or with askUser enabled are not recorded.
 func TranscriptAllowed(u *unstructured.Unstructured) (ok bool, reason string) {
-	mode, _, _ := unstructured.NestedString(u.Object, "spec", "execution", "mode")
+	mode, _, err := unstructured.NestedString(u.Object, "spec", "execution", "mode")
+	if err != nil {
+		return false, "invalid execution spec"
+	}
+	askUser, _, err := unstructured.NestedBool(u.Object, "spec", "execution", "askUser")
+	if err != nil {
+		return false, "invalid execution spec"
+	}
 	if mode == "approve" {
 		return false, "approve mode"
 	}
-	askUser, _, _ := unstructured.NestedBool(u.Object, "spec", "execution", "askUser")
 	if askUser {
 		return false, "askUser enabled"
 	}

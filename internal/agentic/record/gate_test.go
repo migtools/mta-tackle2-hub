@@ -27,6 +27,8 @@ func TestTranscriptAllowed(t *testing.T) {
 		{"auto", mk(map[string]any{"mode": "auto"}), true, ""},
 		{"approve", mk(map[string]any{"mode": "approve"}), false, "approve mode"},
 		{"askUser", mk(map[string]any{"askUser": true}), false, "askUser enabled"},
+		{"askUser string", mk(map[string]any{"askUser": "true"}), false, "invalid execution spec"},
+		{"mode int", mk(map[string]any{"mode": int64(1)}), false, "invalid execution spec"},
 	}
 	for _, c := range cases {
 		ok, reason := TranscriptAllowed(c.u)

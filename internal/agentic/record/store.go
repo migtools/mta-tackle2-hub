@@ -5,11 +5,26 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const metaFile = "meta.json"
+
+var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// safe reports whether v is usable as a single path element component.
+func safe(v string) bool {
+	return v != "" && !strings.ContainsAny(v, `/\`) && !strings.Contains(v, "..")
+}
+
+func validate(name, uid string) error {
+	if !safe(name) || !safe(uid) {
+		return errors.New("invalid run name or uid")
+	}
+	return nil
+}
 
 // Gap is a period during which recording was interrupted.
 type Gap struct {
@@ -41,6 +56,10 @@ func (s *Store) Dir(name, uid string) string {
 
 // ReadMeta reads the run metadata. Returns false when absent.
 func (s *Store) ReadMeta(name, uid string) (m Meta, found bool, err error) {
+	err = validate(name, uid)
+	if err != nil {
+		return
+	}
 	b, err := os.ReadFile(filepath.Join(s.Dir(name, uid), metaFile))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -58,6 +77,10 @@ func (s *Store) ReadMeta(name, uid string) (m Meta, found bool, err error) {
 
 // WriteMeta atomically writes the run metadata (temp file + rename).
 func (s *Store) WriteMeta(name, uid string, m Meta) (err error) {
+	err = validate(name, uid)
+	if err != nil {
+		return
+	}
 	dir := s.Dir(name, uid)
 	err = os.MkdirAll(dir, 0o755)
 	if err != nil {
@@ -91,6 +114,13 @@ func (s *Store) WriteMeta(name, uid string, m Meta) (err error) {
 
 // OpenAppend opens (creating as needed) file for append and returns its current size.
 func (s *Store) OpenAppend(name, uid, file string) (f *os.File, size int64, err error) {
+	err = validate(name, uid)
+	if err == nil && !safe(file) {
+		err = errors.New("invalid file name")
+	}
+	if err != nil {
+		return
+	}
 	dir := s.Dir(name, uid)
 	err = os.MkdirAll(dir, 0o755)
 	if err != nil {
@@ -110,8 +140,11 @@ func (s *Store) OpenAppend(name, uid, file string) (f *os.File, size int64, err 
 	return
 }
 
-// Find returns the newest directory named <name>-<uid>.
+// Find returns the newest directory named <name>-<uuid>.
 func (s *Store) Find(name string) (dir string, uid string, found bool) {
+	if !safe(name) {
+		return
+	}
 	ents, err := os.ReadDir(s.Root)
 	if err != nil {
 		return
@@ -119,7 +152,8 @@ func (s *Store) Find(name string) (dir string, uid string, found bool) {
 	prefix := name + "-"
 	var newest time.Time
 	for _, e := range ents {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) ||
+			!uuidRe.MatchString(strings.TrimPrefix(e.Name(), prefix)) {
 			continue
 		}
 		info, err := e.Info()

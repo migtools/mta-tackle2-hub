@@ -308,13 +308,21 @@ func (h AgenticHandler) copyLinesFrom(ctx *gin.Context, f *os.File, offset int) 
 	if err != nil {
 		return
 	}
-	// Only complete lines: a partial trailing line is left unread.
+	// Only complete lines: a partial trailing line is rewound so a later
+	// follow pass re-reads it. The rewind is relative because a follow
+	// pass reads from where the previous one stopped, not from zero; an
+	// absolute seek here would re-send every line on each poll.
 	complete := data
 	if i := bytesLastIndexByte(data, '\n'); i >= 0 {
 		complete = data[:i+1]
-		// Rewind the file to the start of the partial line so a later
-		// follow pass re-reads it.
-		_, _ = f.Seek(int64(i+1), io.SeekStart)
+		_, _ = f.Seek(-int64(len(data)-i-1), io.SeekCurrent)
+	} else if len(data) > 0 {
+		// No complete line yet: the whole read is a torn line.
+		complete = nil
+		_, _ = f.Seek(-int64(len(data)), io.SeekCurrent)
+	}
+	if len(complete) == 0 {
+		return
 	}
 	lines := strings.Split(string(complete), "\n")
 	if len(lines) > 0 && lines[len(lines)-1] == "" {

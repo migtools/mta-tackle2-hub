@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -214,6 +216,69 @@ func TestTranscriptNoneWhenNoDir(t *testing.T) {
 	}
 	if w.Header().Get("X-Transcript-Status") != "none" {
 		t.Fatalf("status %q", w.Header().Get("X-Transcript-Status"))
+	}
+}
+
+func TestCopyLinesFromFollowNoDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.jsonl")
+	// Ends mid-line: the torn tail must be withheld and re-read later.
+	if err := os.WriteFile(path, []byte("{\"t\":\"1\"}\n{\"t\":\"2\"}\n{\"t\":\"3\""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	h := AgenticHandler{}
+
+	h.copyLinesFrom(ctx, f, 0)
+	if got := w.Body.String(); got != "{\"t\":\"1\"}\n{\"t\":\"2\"}\n" {
+		t.Fatalf("first pass %q", got)
+	}
+
+	// The recorder completes the torn line and adds another.
+	af, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := af.WriteString("456\"}\n{\"t\":\"4\"}\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = af.Close()
+
+	// A follow pass reads from where the first stopped: only the new
+	// lines, never a replay of what was already sent.
+	h.copyLinesFrom(ctx, f, 0)
+	want := "{\"t\":\"1\"}\n{\"t\":\"2\"}\n{\"t\":\"3\"456\"}\n{\"t\":\"4\"}\n"
+	if got := w.Body.String(); got != want {
+		t.Fatalf("second pass %q, want %q", got, want)
+	}
+}
+
+func TestCopyLinesFromTornOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "transcript.jsonl")
+	if err := os.WriteFile(path, []byte("{\"t\":\"par"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	AgenticHandler{}.copyLinesFrom(ctx, f, 0)
+	if got := w.Body.String(); got != "" {
+		t.Fatalf("torn line leaked: %q", got)
 	}
 }
 

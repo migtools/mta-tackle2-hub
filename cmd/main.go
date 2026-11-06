@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	liberr "github.com/jortel/go-utils/error"
 	"github.com/jortel/go-utils/logr"
+	"github.com/konveyor/tackle2-hub/internal/agentic/record"
 	"github.com/konveyor/tackle2-hub/internal/api"
 	"github.com/konveyor/tackle2-hub/internal/auth"
 	"github.com/konveyor/tackle2-hub/internal/controller"
@@ -33,6 +36,7 @@ import (
 	"github.com/konveyor/tackle2-hub/shared/ssh"
 	"gorm.io/gorm"
 	"k8s.io/client-go/kubernetes/scheme"
+	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
@@ -70,6 +74,32 @@ func Setup() (db *gorm.DB, err error) {
 // buildScheme adds CRDs to the k8s scheme.
 func buildScheme() (err error) {
 	err = crd.AddToScheme(scheme.Scheme)
+	return
+}
+
+// buildRecorder builds the agent run recorder.
+// Returns nil when disconnected.
+func buildRecorder(client k8sclient.Client) (m *record.Manager, err error) {
+	if Settings.Disconnected {
+		return
+	}
+	clientSet, err := k8s.NewClientSet()
+	if err != nil {
+		return
+	}
+	ns := Settings.Hub.Namespace
+	m = &record.Manager{
+		Client: client,
+		Store:  &record.Store{Root: filepath.Join(Settings.Hub.Bucket.Path, "agentruns")},
+		Logs:   record.KubeLogOpener(clientSet, ns),
+		KeyFor: func(ctx context.Context, name string) (string, error) {
+			return api.ACPKey(ctx, client, name)
+		},
+		URLFor: func(sandbox string) string {
+			return fmt.Sprintf("ws://%s.%s.svc:%d/acp", sandbox, ns, api.ACPPort)
+		},
+		Interval: 2 * time.Second,
+	}
 	return
 }
 
@@ -175,6 +205,10 @@ func main() {
 	trackerManager := tracker.Manager{
 		DB: db,
 	}
+	recorder, err := buildRecorder(client)
+	if err != nil {
+		return
+	}
 	//
 	// Metrics
 	if Settings.Metrics.Enabled {
@@ -223,6 +257,9 @@ func main() {
 	reaperManager.Run(ctx)
 	importManager.Run(ctx)
 	trackerManager.Run(ctx)
+	if recorder != nil {
+		go recorder.Run(ctx)
+	}
 	// Run Router.
 	err = Run(router)
 }

@@ -1191,9 +1191,15 @@ func (h *AgenticHandler) WorkflowRunDelete(ctx *gin.Context) {
 
 // acpKey reads the ACP secret key from a Secret.
 func (h *AgenticHandler) acpKey(ctx *gin.Context, name string) (key string, err error) {
+	key, err = ACPKey(context.TODO(), h.Client(ctx), name)
+	return
+}
+
+// ACPKey reads the ACP secret key from the named Secret in the hub namespace.
+func ACPKey(ctx context.Context, client k8s.Client, name string) (key string, err error) {
 	secret := &core.Secret{}
-	err = h.Client(ctx).Get(
-		context.TODO(),
+	err = client.Get(
+		ctx,
 		k8s.ObjectKey{
 			Namespace: Settings.Hub.Namespace,
 			Name:      name,

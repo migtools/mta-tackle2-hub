@@ -187,12 +187,13 @@ func (c *TranscriptCapture) connect(ctx context.Context) (conn *websocket.Conn, 
 	if err != nil {
 		return
 	}
+	c0 := conn
 	hs := make(chan struct{})
 	defer close(hs)
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = conn.Close()
+			_ = c0.Close()
 		case <-hs:
 		}
 	}()

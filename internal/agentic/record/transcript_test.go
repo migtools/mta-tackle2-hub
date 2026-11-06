@@ -25,6 +25,10 @@ type fakeAgent struct {
 	// frames sent per connection index (after handshake); then close.
 	frames [][]string
 	key    atomic.Value
+	// reject, if set, refuses the websocket upgrade for that 0-based attempt.
+	reject   func(attempt int) bool
+	attempts int32
+	t        *testing.T
 }
 
 func update(session, text string) string {
@@ -36,6 +40,11 @@ func (f *fakeAgent) server(t *testing.T) *httptest.Server {
 	up := websocket.Upgrader{}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.key.Store(r.Header.Get("X-Secret-Key"))
+		attempt := int(atomic.AddInt32(&f.attempts, 1)) - 1
+		if f.reject != nil && f.reject(attempt) {
+			http.Error(w, "no", http.StatusServiceUnavailable)
+			return
+		}
 		c, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -49,6 +58,7 @@ func (f *fakeAgent) server(t *testing.T) *httptest.Server {
 			var req struct {
 				ID     json.RawMessage `json:"id"`
 				Method string          `json:"method"`
+				Params json.RawMessage `json:"params"`
 			}
 			if c.ReadJSON(&req) != nil {
 				return
@@ -56,6 +66,13 @@ func (f *fakeAgent) server(t *testing.T) *httptest.Server {
 			f.mu.Lock()
 			f.methods[idx] = append(f.methods[idx], req.Method)
 			f.mu.Unlock()
+			want := map[string]string{
+				"initialize":  `{"protocolVersion":1,"clientCapabilities":{}}`,
+				"session/new": `{"cwd":"/workspace","mcpServers":[]}`,
+			}[req.Method]
+			if string(req.Params) != want && f.t != nil {
+				f.t.Errorf("%s params = %s, want %s", req.Method, req.Params, want)
+			}
 			res := `{}`
 			if req.Method == "session/new" {
 				res = `{"sessionId":"viewer-1"}`
@@ -108,6 +125,7 @@ func lines(t *testing.T, s *Store) []string {
 
 func TestCaptureWritesRunFramesOnly(t *testing.T) {
 	f := &fakeAgent{frames: [][]string{{update("run-1", "a"), update("run-1", "b"), update("viewer-1", "x"), update("run-1", "c")}}}
+	f.t = t
 	srv := f.server(t)
 	defer srv.Close()
 	c, s := newCapture(t, srv, func() bool { return false })
@@ -126,6 +144,7 @@ func TestCaptureWritesRunFramesOnly(t *testing.T) {
 
 func TestGapMarkerOnReconnect(t *testing.T) {
 	f := &fakeAgent{frames: [][]string{{update("run-1", "a")}, {update("run-1", "b"), update("run-1", "c")}}}
+	f.t = t
 	srv := f.server(t)
 	defer srv.Close()
 	var n int32
@@ -143,6 +162,7 @@ func TestGapMarkerOnReconnect(t *testing.T) {
 
 func TestNeverPrompts(t *testing.T) {
 	f := &fakeAgent{frames: [][]string{{update("run-1", "a")}, {update("run-1", "b")}}}
+	f.t = t
 	srv := f.server(t)
 	defer srv.Close()
 	var n int32
@@ -162,6 +182,7 @@ func TestNeverPrompts(t *testing.T) {
 
 func TestGapOnRestartWithExistingFile(t *testing.T) {
 	f := &fakeAgent{frames: [][]string{{update("run-1", "b")}}}
+	f.t = t
 	srv := f.server(t)
 	defer srv.Close()
 	c, s := newCapture(t, srv, func() bool { return false })
@@ -185,5 +206,99 @@ func TestGapOnRestartWithExistingFile(t *testing.T) {
 	m, _, _ := s.ReadMeta("run-1", testUID)
 	if m.Transcript != "incomplete" || len(m.Gaps) != 1 {
 		t.Fatalf("meta: %+v", m)
+	}
+}
+
+func TestGapRecordedWhenRunEndsBeforeReconnect(t *testing.T) {
+	f := &fakeAgent{frames: [][]string{{update("run-1", "a")}}, reject: func(a int) bool { return a >= 1 }}
+	f.t = t
+	srv := f.server(t)
+	defer srv.Close()
+	var n int32
+	c, s := newCapture(t, srv, func() bool { return atomic.AddInt32(&n, 1) == 1 })
+	c.Run(context.Background())
+	got := lines(t, s)
+	if len(got) != 2 || !strings.HasPrefix(got[1], `{"gap":`) {
+		t.Fatalf("unexpected lines: %v", got)
+	}
+	m, _, _ := s.ReadMeta("run-1", testUID)
+	if m.Transcript != "incomplete" || len(m.Gaps) != 1 || m.Ended == nil {
+		t.Fatalf("meta: %+v", m)
+	}
+}
+
+func TestCtxCancelWhileLiveIsNotComplete(t *testing.T) {
+	f := &fakeAgent{frames: [][]string{{update("run-1", "a")}}}
+	f.t = t
+	srv := f.server(t)
+	defer srv.Close()
+	c, s := newCapture(t, srv, func() bool { return true })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(filepath.Join(s.Dir("run-1", testUID), "transcript.jsonl"))
+		if len(b) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	m, _, _ := s.ReadMeta("run-1", testUID)
+	if m.Transcript != "incomplete" || m.Ended != nil {
+		t.Fatalf("meta: %+v", m)
+	}
+}
+
+func TestNoGapBeforeFirstConnect(t *testing.T) {
+	f := &fakeAgent{frames: [][]string{{update("run-1", "a")}}, reject: func(a int) bool { return a == 0 }}
+	f.t = t
+	srv := f.server(t)
+	defer srv.Close()
+	var n int32
+	c, s := newCapture(t, srv, func() bool { return atomic.AddInt32(&n, 1) == 1 })
+	c.Run(context.Background())
+	got := lines(t, s)
+	if len(got) != 1 || strings.HasPrefix(got[0], `{"gap":`) {
+		t.Fatalf("unexpected lines: %v", got)
+	}
+	m, _, _ := s.ReadMeta("run-1", testUID)
+	if m.Transcript != "complete" || len(m.Gaps) != 0 {
+		t.Fatalf("meta: %+v", m)
+	}
+}
+
+func TestRestartAfterTornLine(t *testing.T) {
+	f := &fakeAgent{frames: [][]string{{update("run-1", "b")}}}
+	f.t = t
+	srv := f.server(t)
+	defer srv.Close()
+	c, s := newCapture(t, srv, func() bool { return false })
+	file, _, err := s.OpenAppend("run-1", testUID, "transcript.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString(`{"t":"2026-11-06T00:00:00Z","frame":{"a":1}}` + "\n" + `{"t":"2026-11-06T00:00:0`)
+	_ = file.Close()
+	c.Run(context.Background())
+	got := lines(t, s)
+	if len(got) != 4 {
+		t.Fatalf("unexpected lines: %v", got)
+	}
+	for i, l := range got {
+		if i != 1 && !json.Valid([]byte(l)) {
+			t.Fatalf("line %d invalid: %s", i, l)
+		}
+	}
+	var g struct{ Gap Gap }
+	want, _ := time.Parse(time.RFC3339, "2026-11-06T00:00:00Z")
+	if err := json.Unmarshal([]byte(got[2]), &g); err != nil || !g.Gap.From.Equal(want) {
+		t.Fatalf("gap: %+v %v", g, err)
 	}
 }
